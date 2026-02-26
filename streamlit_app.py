@@ -1,3 +1,4 @@
+import re
 import streamlit as st
 import openpyxl
 from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
@@ -17,36 +18,81 @@ st.set_page_config(
 )
 
 # ============================================================
-# 欄位對應設定（與桌面版相同）
+# 欄位對應設定
 # ============================================================
 DB1_MAPPING = {
     'A': 'B', 'B': 'C', 'C': 'D', 'D': 'E', 'E': 'F',
     'F': 'G', 'G': 'H', 'H': 'I', 'I': 'J', 'J': 'K', 'K': 'L',
 }
 DB1_IMAGE_SRC_COL = 1
-DB1_EXPECTED_HEADERS = [
-    'Trademark', 'Logotype', 'Databases', 'Classes',
-    'Application number', 'Owner/Applicant', 'Application date',
-    'Publication date', 'Deadline for opposition',
-    'Goods & Services', 'Goods & Services (Translated)',
-]
 
 DB2_MAPPING = {
     'B': 'B', 'C': 'C', 'D': 'D', 'E': 'E', 'F': 'F',
     'G': 'G', 'H': 'H', 'I': 'I', 'K': 'J', 'M': 'K',
 }
 DB2_IMAGE_SRC_COL = 2
-DB2_EXPECTED_HEADERS = [
-    '序号', '商标文字', '商标图样', '地區', '类别',
-    '申请号', '申请人', '申请日期', '初审公告日期',
-]
 
 DB3_MAPPING = {
-    'B': 'B', 'C': 'C', 'K': 'K', 'L': 'L',
-    'N': 'D', 'O': 'E', 'P': 'F', 'Q': 'G', 'R': 'H', 'S': 'I', 'T': 'J',
+    'B': 'B', 'C': 'C',
+    'D': 'D', 'E': 'E', 'F': 'F', 'G': 'G', 'H': 'H', 'I': 'I', 'J': 'J',
+    'K': 'K', 'L': 'L',
 }
 DB3_IMAGE_SRC_COL = 2
-DB3_EXPECTED_HEADERS = ['#', '他人商標', '商標圖樣']
+
+# DB3 需要清理的欄位（去除前綴、轉換日期格式）
+MONTH_MAP = {
+    'JAN': '01', 'FEB': '02', 'MAR': '03', 'APR': '04',
+    'MAY': '05', 'JUN': '06', 'JUL': '07', 'AUG': '08',
+    'SEP': '09', 'OCT': '10', 'NOV': '11', 'DEC': '12',
+}
+
+
+def clean_db3_date(value):
+    """將 DB3 日期格式轉為 YYYY-MM-DD，例如 '02-JAN-2026' → '2026-01-02'"""
+    if not value or not isinstance(value, str):
+        return value
+    value = value.strip()
+    # 去除前綴 "App: " 或 "Opp "
+    value = re.sub(r'^(App:\s*|Opp\s+)', '', value)
+    # 轉換 DD-MON-YYYY → YYYY-MM-DD
+    m = re.match(r'^(\d{1,2})-([A-Z]{3})-(\d{4})$', value)
+    if m:
+        day, mon, year = m.groups()
+        month_num = MONTH_MAP.get(mon)
+        if month_num:
+            return f'{year}-{month_num}-{day.zfill(2)}'
+    return value
+
+
+def clean_db3_app_number(value):
+    """去除申請號的前綴，例如 'App 26000442' → '26000442'"""
+    if not value or not isinstance(value, str):
+        return value
+    return re.sub(r'^(App|Reg)\s+', '', value.strip())
+
+
+# DB3 地區名稱對照表
+DB3_REGION_MAP = {
+    'EU trade marks': 'EUIPO',
+    'International Register': 'WIPO',
+    'United States of America': 'US (USPTO)',
+}
+
+
+def clean_db3_region(value):
+    """轉換 DB3 地區名稱，例如 'EU trade marks' → 'EUIPO'"""
+    if not value or not isinstance(value, str):
+        return value
+    value = value.strip()
+    # 先檢查完全匹配
+    if value in DB3_REGION_MAP:
+        return DB3_REGION_MAP[value]
+    # 處理帶括號的情況，例如 "EU trade marks (unpublished applications)" → "EUIPO(unpublished applications)"
+    for original, replacement in DB3_REGION_MAP.items():
+        if value.startswith(original):
+            suffix = value[len(original):]  # 例如 " (unpublished applications)"
+            return replacement + suffix.lstrip()  # "EUIPO(unpublished applications)"
+    return value
 
 MERGED_HEADERS = [
     '#', '他人商標', '商標圖樣', '地區', '商標類別',
@@ -69,24 +115,46 @@ def col_letter_to_index(letter):
     return result - 1
 
 
-def read_source_data(file_bytes, mapping, expected_headers, header_row=1, data_start_row=2):
+def detect_db_type(file_bytes):
+    """
+    自動辨識檔案來自哪個資料庫。
+    回傳 'db1', 'db2', 'db3', 或 None（無法辨識）。
+    """
+    try:
+        wb = openpyxl.load_workbook(BytesIO(file_bytes), read_only=True, data_only=True)
+        ws = wb.active
+        headers = set()
+        for cell in ws[1]:
+            if cell.value is not None:
+                headers.add(str(cell.value).strip())
+        max_col = ws.max_column
+        wb.close()
+
+        # DB1：英文標頭，含 "Trademark"
+        if 'Trademark' in headers:
+            return 'db1'
+
+        # DB2：簡體中文，含 "商标文字"
+        if '商标文字' in headers:
+            return 'db2'
+
+        # DB3：繁體中文，含 "他人商標"（與 DB2 的 "商标文字" 區分）
+        if '他人商標' in headers:
+            return 'db3'
+
+        return None
+    except Exception:
+        return None
+
+
+def read_source_data(file_bytes, mapping, db_type=''):
+    """讀取來源 Excel 並按 mapping 轉換欄位"""
     wb = openpyxl.load_workbook(BytesIO(file_bytes), read_only=True, data_only=True)
     ws = wb.active
-    headers = [cell.value for cell in ws[header_row]]
-    matched = sum(
-        1 for exp in expected_headers
-        if any(h and str(h).strip() == str(exp).strip() for h in headers)
-    )
-    if matched < min(3, len(expected_headers)):
-        wb.close()
-        actual = [str(h) for h in headers[:15] if h]
-        raise ValueError(
-            f"標頭驗證失敗！預期含有 {expected_headers[:5]}，"
-            f"實際標頭為 {actual}，僅匹配 {matched} 個"
-        )
     rows = []
     for row_idx, row in enumerate(
-        ws.iter_rows(min_row=data_start_row, values_only=False), start=data_start_row
+        ws.iter_rows(min_row=SOURCE_DATA_START, values_only=False),
+        start=SOURCE_DATA_START,
     ):
         if row_idx > ws.max_row:
             break
@@ -95,6 +163,20 @@ def read_source_data(file_bytes, mapping, expected_headers, header_row=1, data_s
             src_idx = col_letter_to_index(src_col_letter)
             if src_idx < len(row):
                 merged_row[dest_col_letter] = row[src_idx].value
+        # DB3 資料清理
+        if db_type == 'db3':
+            if 'F' in merged_row:
+                merged_row['F'] = clean_db3_app_number(merged_row['F'])
+            if 'D' in merged_row:
+                merged_row['D'] = clean_db3_region(merged_row['D'])
+            for date_col in ['H', 'I', 'J']:
+                if date_col in merged_row:
+                    merged_row[date_col] = clean_db3_date(merged_row[date_col])
+            # 空的公告日期 → 1900-01-00、空的異議期限 → 0
+            if not merged_row.get('I') or str(merged_row['I']).strip() == '':
+                merged_row['I'] = '1900-01-00'
+            if not merged_row.get('J') or str(merged_row['J']).strip() == '':
+                merged_row['J'] = '0'
         if any(v is not None for v in merged_row.values()):
             rows.append(merged_row)
     wb.close()
@@ -102,6 +184,7 @@ def read_source_data(file_bytes, mapping, expected_headers, header_row=1, data_s
 
 
 def read_source_images(file_bytes, src_image_col):
+    """讀取來源檔案中的圖片"""
     wb = openpyxl.load_workbook(BytesIO(file_bytes))
     ws = wb.active
     images = {}
@@ -126,6 +209,7 @@ def read_source_images(file_bytes, src_image_col):
 
 
 def create_merged_file(all_rows, all_images, progress_bar=None):
+    """建立合併後的 Excel 檔"""
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = '商標監控結果清單'
@@ -157,7 +241,10 @@ def create_merged_file(all_rows, all_images, progress_bar=None):
             cell = ws.cell(row=row_num, column=ci, value=v if v is not None else '')
             cell.font = data_font
         if progress_bar and i % 50 == 0:
-            progress_bar.progress(0.3 + 0.3 * (i / max(total, 1)), text=f'寫入資料 {i}/{total}...')
+            progress_bar.progress(
+                0.3 + 0.3 * (i / max(total, 1)),
+                text=f'寫入資料 {i}/{total}...',
+            )
 
     col_widths = {
         'A': 6, 'B': 30, 'C': 12, 'D': 20, 'E': 12,
@@ -222,114 +309,167 @@ def create_merged_file(all_rows, all_images, progress_bar=None):
 # ============================================================
 # Streamlit 介面
 # ============================================================
+DB_LABELS = {
+    'db1': '資料庫 1',
+    'db2': '資料庫 2',
+    'db3': '資料庫 3',
+}
+
 st.title("📋 商標監控資料合併工具")
-st.markdown("上傳 3 個資料庫的原始 Excel 檔，自動合併為統一格式（含商標圖片）。")
+st.markdown("上傳各資料庫的原始 Excel 檔（最多 15 個），系統會自動辨識來源並合併。")
 
 st.divider()
 
-col1, col2, col3 = st.columns(3)
+# 單一上傳窗口
+uploaded_files = st.file_uploader(
+    "選擇要合併的 Excel 檔案",
+    type=["xlsx"],
+    accept_multiple_files=True,
+    help="支援同時上傳多個檔案，系統會自動辨識來自哪個資料庫",
+)
 
-with col1:
-    st.markdown("**資料庫 1**")
-    st.caption("Trademark, Logotype, Databases...")
-    file_db1 = st.file_uploader("選擇檔案", type=["xlsx"], key="db1")
+# 檢查上傳數量
+if uploaded_files and len(uploaded_files) > 15:
+    st.error("⚠️ 最多只能上傳 15 個檔案，請減少檔案數量。")
+    st.stop()
 
-with col2:
-    st.markdown("**資料庫 2**")
-    st.caption("序号, 商标文字, 商标图样...")
-    file_db2 = st.file_uploader("選擇檔案", type=["xlsx"], key="db2")
+# 辨識並分類檔案
+if uploaded_files:
+    classified = {'db1': [], 'db2': [], 'db3': []}
+    unknown_files = []
 
-with col3:
-    st.markdown("**資料庫 3**")
-    st.caption("他人商標, 商標圖樣, 地區...")
-    file_db3 = st.file_uploader("選擇檔案", type=["xlsx"], key="db3")
+    for f in uploaded_files:
+        file_bytes = f.getvalue()
+        db_type = detect_db_type(file_bytes)
+        if db_type:
+            classified[db_type].append((f.name, file_bytes))
+        else:
+            unknown_files.append(f.name)
 
-st.divider()
+    # 顯示辨識結果
+    st.subheader("📂 檔案辨識結果")
 
-# 狀態顯示
-if file_db1 and file_db2 and file_db3:
-    st.success("✅ 三個檔案已上傳，可以開始合併！")
+    cols = st.columns(3)
+    for i, (db_key, label) in enumerate(DB_LABELS.items()):
+        with cols[i]:
+            files_list = classified[db_key]
+            count = len(files_list)
+            if count > 0:
+                st.success(f"**{label}**　{count} 個檔案")
+                for fname, _ in files_list:
+                    st.caption(f"　📄 {fname}")
+            else:
+                st.warning(f"**{label}**　未偵測到")
 
+    if unknown_files:
+        st.error(
+            f"⚠️ 以下 {len(unknown_files)} 個檔案無法辨識來源，將被忽略：\n\n"
+            + "\n".join(f"- {name}" for name in unknown_files)
+        )
+
+    # 確認至少有檔案可以合併
+    total_files = sum(len(v) for v in classified.values())
+    if total_files == 0:
+        st.error("沒有可辨識的檔案，請確認上傳的是正確的原始檔。")
+        st.stop()
+
+    st.divider()
+
+    # 合併按鈕
     if st.button("🚀 開始合併", type="primary", use_container_width=True):
         progress_bar = st.progress(0, text="開始處理...")
-        status = st.empty()
         logs = []
 
         try:
-            # 讀取原始位元組
-            db1_bytes = file_db1.getvalue()
-            db2_bytes = file_db2.getvalue()
-            db3_bytes = file_db3.getvalue()
-
-            # ---- 資料庫 1 ----
-            progress_bar.progress(0.05, text="讀取資料庫 1...")
-            db1_rows = read_source_data(db1_bytes, DB1_MAPPING, DB1_EXPECTED_HEADERS)
-            logs.append(f"資料庫 1：{len(db1_rows)} 筆資料")
-
-            progress_bar.progress(0.10, text="讀取資料庫 1 圖片...")
-            db1_images = read_source_images(db1_bytes, DB1_IMAGE_SRC_COL)
-            logs.append(f"資料庫 1：{len(db1_images)} 張圖片")
-
-            # ---- 資料庫 2 ----
-            progress_bar.progress(0.15, text="讀取資料庫 2...")
-            db2_rows = read_source_data(db2_bytes, DB2_MAPPING, DB2_EXPECTED_HEADERS)
-            logs.append(f"資料庫 2：{len(db2_rows)} 筆資料")
-
-            progress_bar.progress(0.20, text="讀取資料庫 2 圖片...")
-            db2_images = read_source_images(db2_bytes, DB2_IMAGE_SRC_COL)
-            logs.append(f"資料庫 2：{len(db2_images)} 張圖片")
-
-            # ---- 資料庫 3 ----
-            progress_bar.progress(0.25, text="讀取資料庫 3...")
-            db3_rows = read_source_data(db3_bytes, DB3_MAPPING, DB3_EXPECTED_HEADERS)
-            logs.append(f"資料庫 3：{len(db3_rows)} 筆資料")
-
-            progress_bar.progress(0.28, text="讀取資料庫 3 圖片...")
-            db3_images = read_source_images(db3_bytes, DB3_IMAGE_SRC_COL)
-            logs.append(f"資料庫 3：{len(db3_images)} 張圖片")
-
-            # ---- 組合 ----
-            all_rows = db1_rows + db2_rows + db3_rows
+            all_rows = []
             all_images = []
+            row_counts = {}
+            img_counts = {}
 
-            ro1 = MERGED_DATA_START - SOURCE_DATA_START  # = 1
-            for r, info in db1_images.items():
-                info['orig_row'] = r
-                all_images.append((info, ro1))
+            # 定義處理順序和對應的設定
+            db_configs = {
+                'db1': {'mapping': DB1_MAPPING, 'img_col': DB1_IMAGE_SRC_COL},
+                'db2': {'mapping': DB2_MAPPING, 'img_col': DB2_IMAGE_SRC_COL},
+                'db3': {'mapping': DB3_MAPPING, 'img_col': DB3_IMAGE_SRC_COL},
+            }
 
-            ro2 = ro1 + len(db1_rows)
-            for r, info in db2_images.items():
-                info['orig_row'] = r
-                all_images.append((info, ro2))
+            step = 0
+            total_steps = total_files * 2  # 每個檔案讀資料 + 讀圖片
 
-            ro3 = ro2 + len(db2_rows)
-            for r, info in db3_images.items():
-                info['orig_row'] = r
-                all_images.append((info, ro3))
+            # 按 db1 → db2 → db3 順序處理
+            for db_key in ['db1', 'db2', 'db3']:
+                files_list = classified[db_key]
+                if not files_list:
+                    continue
 
-            progress_bar.progress(0.30, text=f"建立合併檔（{len(all_rows)} 筆，{len(all_images)} 張圖片）...")
+                config = db_configs[db_key]
+                label = DB_LABELS[db_key]
+                db_row_count = 0
+                db_img_count = 0
 
-            # ---- 建立合併檔 ----
+                for fname, file_bytes in files_list:
+                    # 讀取資料
+                    step += 1
+                    progress_bar.progress(
+                        0.05 + 0.20 * (step / total_steps),
+                        text=f'讀取 {label}：{fname}...',
+                    )
+                    rows = read_source_data(file_bytes, config['mapping'], db_type=db_key)
+                    logs.append(f"{label} / {fname}：{len(rows)} 筆資料")
+
+                    # 讀取圖片
+                    step += 1
+                    progress_bar.progress(
+                        0.05 + 0.20 * (step / total_steps),
+                        text=f'讀取 {label} 圖片：{fname}...',
+                    )
+                    images = read_source_images(file_bytes, config['img_col'])
+                    logs.append(f"{label} / {fname}：{len(images)} 張圖片")
+
+                    # 計算圖片位移
+                    row_offset = (MERGED_DATA_START - SOURCE_DATA_START) + len(all_rows)
+                    for src_row, img_info in images.items():
+                        img_info['orig_row'] = src_row
+                        all_images.append((img_info, row_offset))
+
+                    all_rows.extend(rows)
+                    db_row_count += len(rows)
+                    db_img_count += len(images)
+
+                row_counts[db_key] = db_row_count
+                img_counts[db_key] = db_img_count
+
+            # 建立合併檔
+            progress_bar.progress(0.30, text=f'建立合併檔（{len(all_rows)} 筆，{len(all_images)} 張圖片）...')
             output_bytes, count = create_merged_file(all_rows, all_images, progress_bar)
-
             progress_bar.progress(1.0, text="合併完成！")
 
-            total_imgs = len(db1_images) + len(db2_images) + len(db3_images)
-            logs.append(f"───────────────────")
-            logs.append(f"合計：{count} 筆 / {total_imgs} 張圖片")
+            # 執行記錄彙總
+            logs.append("───────────────────")
+            for db_key, label in DB_LABELS.items():
+                rc = row_counts.get(db_key, 0)
+                ic = img_counts.get(db_key, 0)
+                fc = len(classified[db_key])
+                if fc > 0:
+                    logs.append(f"{label}：{fc} 個檔案 → {rc} 筆 / {ic} 張圖片")
+            logs.append(f"合計：{count} 筆 / {len(all_images)} 張圖片")
 
             # 顯示結果
             st.balloons()
 
             result_cols = st.columns(3)
-            with result_cols[0]:
-                st.metric("資料庫 1", f"{len(db1_rows)} 筆", f"{len(db1_images)} 張圖片")
-            with result_cols[1]:
-                st.metric("資料庫 2", f"{len(db2_rows)} 筆", f"{len(db2_images)} 張圖片")
-            with result_cols[2]:
-                st.metric("資料庫 3", f"{len(db3_rows)} 筆", f"{len(db3_images)} 張圖片")
+            for i, (db_key, label) in enumerate(DB_LABELS.items()):
+                with result_cols[i]:
+                    rc = row_counts.get(db_key, 0)
+                    ic = img_counts.get(db_key, 0)
+                    fc = len(classified[db_key])
+                    st.metric(
+                        f"{label}（{fc} 檔）",
+                        f"{rc} 筆",
+                        f"{ic} 張圖片",
+                    )
 
-            st.markdown(f"### 合計：{count} 筆資料 / {total_imgs} 張圖片")
+            st.markdown(f"### 合計：{count} 筆資料 / {len(all_images)} 張圖片")
 
             # 下載按鈕
             filename = f"合併檔_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
@@ -353,16 +493,6 @@ if file_db1 and file_db2 and file_db3:
             import traceback
             with st.expander("錯誤詳情"):
                 st.code(traceback.format_exc())
-
-else:
-    missing = []
-    if not file_db1:
-        missing.append("資料庫 1")
-    if not file_db2:
-        missing.append("資料庫 2")
-    if not file_db3:
-        missing.append("資料庫 3")
-    st.info(f"請上傳以下檔案：{'、'.join(missing)}")
 
 # 頁尾
 st.divider()
