@@ -530,26 +530,26 @@ if uploaded_files:
 
             st.markdown(f"### 合計：{count} 筆資料 / {len(all_images)} 張圖片")
 
-            # 下載按鈕
+            # 下載 + 重新開始（並排）
             filename = f"合併檔_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
-            st.download_button(
-                label="⬇️ 下載合併檔",
-                data=output_bytes,
-                file_name=filename,
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                type="primary",
-                use_container_width=True,
-            )
+            btn_col1, btn_col2 = st.columns(2)
+            with btn_col1:
+                st.download_button(
+                    label="⬇️ 下載合併檔",
+                    data=output_bytes,
+                    file_name=filename,
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    type="primary",
+                    use_container_width=True,
+                )
+            with btn_col2:
+                if st.button("🔄 重新開始", use_container_width=True):
+                    st.rerun()
 
             # 執行記錄
             with st.expander("📝 執行記錄"):
                 for log in logs:
                     st.text(log)
-
-            # 重新開始按鈕
-            st.divider()
-            if st.button("🔄 重新開始", use_container_width=True):
-                st.rerun()
 
         except Exception as e:
             progress_bar.empty()
