@@ -426,137 +426,151 @@ if uploaded_files:
 
     st.divider()
 
-    # 合併按鈕
-    if st.button("🚀 開始合併", type="primary", use_container_width=True):
-        progress_bar = st.progress(0, text="開始處理...")
-        logs = []
+    # 初始化 session_state
+    if 'merge_done' not in st.session_state:
+        st.session_state.merge_done = False
 
-        try:
-            all_rows = []
-            all_images = []
-            row_counts = {}
-            img_counts = {}
+    # 合併按鈕（僅在尚未合併時顯示）
+    if not st.session_state.merge_done:
+        if st.button("🚀 開始合併", type="primary", use_container_width=True):
+            progress_bar = st.progress(0, text="開始處理...")
+            logs = []
 
-            # 定義處理順序和對應的設定
-            db_configs = {
-                'merged': {'mapping': MERGED_FILE_MAPPING, 'img_col': MERGED_FILE_IMAGE_SRC_COL},
-                'db1': {'mapping': DB1_MAPPING, 'img_col': DB1_IMAGE_SRC_COL},
-                'db2': {'mapping': DB2_MAPPING, 'img_col': DB2_IMAGE_SRC_COL},
-                'db3': {'mapping': DB3_MAPPING, 'img_col': DB3_IMAGE_SRC_COL},
-            }
+            try:
+                all_rows = []
+                all_images = []
+                row_counts = {}
+                img_counts = {}
 
-            step = 0
-            total_steps = total_files * 2  # 每個檔案讀資料 + 讀圖片
+                # 定義處理順序和對應的設定
+                db_configs = {
+                    'merged': {'mapping': MERGED_FILE_MAPPING, 'img_col': MERGED_FILE_IMAGE_SRC_COL},
+                    'db1': {'mapping': DB1_MAPPING, 'img_col': DB1_IMAGE_SRC_COL},
+                    'db2': {'mapping': DB2_MAPPING, 'img_col': DB2_IMAGE_SRC_COL},
+                    'db3': {'mapping': DB3_MAPPING, 'img_col': DB3_IMAGE_SRC_COL},
+                }
 
-            # 按 合併檔 → db1 → db2 → db3 順序處理
-            for db_key in ['merged', 'db1', 'db2', 'db3']:
-                files_list = classified[db_key]
-                if not files_list:
-                    continue
+                step = 0
+                total_steps = total_files * 2  # 每個檔案讀資料 + 讀圖片
 
-                config = db_configs[db_key]
-                label = DB_LABELS[db_key]
-                db_row_count = 0
-                db_img_count = 0
+                # 按 合併檔 → db1 → db2 → db3 順序處理
+                for db_key in ['merged', 'db1', 'db2', 'db3']:
+                    files_list = classified[db_key]
+                    if not files_list:
+                        continue
 
-                for fname, file_bytes in files_list:
-                    # 讀取資料
-                    step += 1
-                    progress_bar.progress(
-                        0.05 + 0.20 * (step / total_steps),
-                        text=f'讀取 {label}：{fname}...',
-                    )
-                    rows = read_source_data(file_bytes, config['mapping'], db_type=db_key)
-                    logs.append(f"{label} / {fname}：{len(rows)} 筆資料")
+                    config = db_configs[db_key]
+                    label = DB_LABELS[db_key]
+                    db_row_count = 0
+                    db_img_count = 0
 
-                    # 讀取圖片
-                    step += 1
-                    progress_bar.progress(
-                        0.05 + 0.20 * (step / total_steps),
-                        text=f'讀取 {label} 圖片：{fname}...',
-                    )
-                    images = read_source_images(file_bytes, config['img_col'])
-                    logs.append(f"{label} / {fname}：{len(images)} 張圖片")
+                    for fname, file_bytes in files_list:
+                        # 讀取資料
+                        step += 1
+                        progress_bar.progress(
+                            0.05 + 0.20 * (step / total_steps),
+                            text=f'讀取 {label}：{fname}...',
+                        )
+                        rows = read_source_data(file_bytes, config['mapping'], db_type=db_key)
+                        logs.append(f"{label} / {fname}：{len(rows)} 筆資料")
 
-                    # 計算圖片位移
-                    if db_key == 'merged':
-                        src_header_row = find_merged_header_row(file_bytes) or 2
-                        src_data_start = src_header_row + 1
-                    else:
-                        src_data_start = SOURCE_DATA_START
-                    row_offset = (MERGED_DATA_START - src_data_start) + len(all_rows)
-                    for src_row, img_info in images.items():
-                        img_info['orig_row'] = src_row
-                        all_images.append((img_info, row_offset))
+                        # 讀取圖片
+                        step += 1
+                        progress_bar.progress(
+                            0.05 + 0.20 * (step / total_steps),
+                            text=f'讀取 {label} 圖片：{fname}...',
+                        )
+                        images = read_source_images(file_bytes, config['img_col'])
+                        logs.append(f"{label} / {fname}：{len(images)} 張圖片")
 
-                    all_rows.extend(rows)
-                    db_row_count += len(rows)
-                    db_img_count += len(images)
+                        # 計算圖片位移
+                        if db_key == 'merged':
+                            src_header_row = find_merged_header_row(file_bytes) or 2
+                            src_data_start = src_header_row + 1
+                        else:
+                            src_data_start = SOURCE_DATA_START
+                        row_offset = (MERGED_DATA_START - src_data_start) + len(all_rows)
+                        for src_row, img_info in images.items():
+                            img_info['orig_row'] = src_row
+                            all_images.append((img_info, row_offset))
 
-                row_counts[db_key] = db_row_count
-                img_counts[db_key] = db_img_count
+                        all_rows.extend(rows)
+                        db_row_count += len(rows)
+                        db_img_count += len(images)
 
-            # 建立合併檔
-            progress_bar.progress(0.30, text=f'建立合併檔（{len(all_rows)} 筆，{len(all_images)} 張圖片）...')
-            output_bytes, count = create_merged_file(all_rows, all_images, progress_bar)
-            progress_bar.progress(1.0, text="合併完成！")
+                    row_counts[db_key] = db_row_count
+                    img_counts[db_key] = db_img_count
 
-            # 執行記錄彙總
-            logs.append("───────────────────")
-            for db_key, label in DB_LABELS.items():
-                rc = row_counts.get(db_key, 0)
-                ic = img_counts.get(db_key, 0)
-                fc = len(classified[db_key])
-                if fc > 0:
-                    logs.append(f"{label}：{fc} 個檔案 → {rc} 筆 / {ic} 張圖片")
-            logs.append(f"合計：{count} 筆 / {len(all_images)} 張圖片")
+                # 建立合併檔
+                progress_bar.progress(0.30, text=f'建立合併檔（{len(all_rows)} 筆，{len(all_images)} 張圖片）...')
+                output_bytes, count = create_merged_file(all_rows, all_images, progress_bar)
+                progress_bar.progress(1.0, text="合併完成！")
 
-            # 顯示結果
-            st.balloons()
-
-            # 只顯示有資料的來源
-            active_dbs = [(k, v) for k, v in DB_LABELS.items() if len(classified[k]) > 0]
-            result_cols = st.columns(len(active_dbs)) if active_dbs else st.columns(1)
-            for i, (db_key, label) in enumerate(active_dbs):
-                with result_cols[i]:
+                # 執行記錄彙總
+                logs.append("───────────────────")
+                for db_key, label in DB_LABELS.items():
                     rc = row_counts.get(db_key, 0)
                     ic = img_counts.get(db_key, 0)
                     fc = len(classified[db_key])
-                    st.metric(
-                        f"{label}（{fc} 檔）",
-                        f"{rc} 筆",
-                        f"{ic} 張圖片",
-                    )
+                    if fc > 0:
+                        logs.append(f"{label}：{fc} 個檔案 → {rc} 筆 / {ic} 張圖片")
+                logs.append(f"合計：{count} 筆 / {len(all_images)} 張圖片")
 
-            st.markdown(f"### 合計：{count} 筆資料 / {len(all_images)} 張圖片")
+                # 儲存結果到 session_state，下載後頁面 rerun 時仍可顯示
+                st.session_state.merge_done = True
+                st.session_state.merge_output = output_bytes.getvalue()
+                st.session_state.merge_count = count
+                st.session_state.merge_img_count = len(all_images)
+                st.session_state.merge_logs = logs
+                st.session_state.merge_filename = f"合併檔_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+                st.session_state.merge_active_dbs = [
+                    (db_key, DB_LABELS[db_key], row_counts.get(db_key, 0), img_counts.get(db_key, 0), len(classified[db_key]))
+                    for db_key in DB_LABELS if len(classified[db_key]) > 0
+                ]
+                st.rerun()
 
-            # 下載 + 重新開始（並排）
-            filename = f"合併檔_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
-            btn_col1, btn_col2 = st.columns(2)
-            with btn_col1:
-                st.download_button(
-                    label="⬇️ 下載合併檔",
-                    data=output_bytes,
-                    file_name=filename,
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    type="primary",
-                    use_container_width=True,
-                )
-            with btn_col2:
-                if st.button("🔄 重新開始", use_container_width=True):
-                    st.rerun()
+            except Exception as e:
+                progress_bar.empty()
+                st.error(f"❌ 合併失敗：{str(e)}")
+                import traceback
+                with st.expander("錯誤詳情"):
+                    st.code(traceback.format_exc())
 
-            # 執行記錄
-            with st.expander("📝 執行記錄"):
-                for log in logs:
-                    st.text(log)
+    # 下載後自動重置的 callback
+    def _reset_after_download():
+        for key in ['merge_done', 'merge_output', 'merge_count', 'merge_img_count',
+                     'merge_logs', 'merge_filename', 'merge_active_dbs']:
+            st.session_state.pop(key, None)
 
-        except Exception as e:
-            progress_bar.empty()
-            st.error(f"❌ 合併失敗：{str(e)}")
-            import traceback
-            with st.expander("錯誤詳情"):
-                st.code(traceback.format_exc())
+    # 合併完成後：持久顯示結果（即使下載觸發 rerun 也不會消失）
+    if st.session_state.merge_done:
+        st.balloons()
+        st.success("合併完成！")
+
+        # 顯示各來源統計
+        active_dbs = st.session_state.merge_active_dbs
+        result_cols = st.columns(len(active_dbs)) if active_dbs else st.columns(1)
+        for i, (db_key, label, rc, ic, fc) in enumerate(active_dbs):
+            with result_cols[i]:
+                st.metric(f"{label}（{fc} 檔）", f"{rc} 筆", f"{ic} 張圖片")
+
+        st.markdown(f"### 合計：{st.session_state.merge_count} 筆資料 / {st.session_state.merge_img_count} 張圖片")
+
+        # 下載按鈕（點擊後自動重置頁面）
+        st.download_button(
+            label="⬇️ 下載合併檔",
+            data=st.session_state.merge_output,
+            file_name=st.session_state.merge_filename,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            type="primary",
+            use_container_width=True,
+            on_click=_reset_after_download,
+        )
+
+        # 執行記錄
+        with st.expander("📝 執行記錄"):
+            for log in st.session_state.merge_logs:
+                st.text(log)
 
 # 頁尾
 st.divider()
