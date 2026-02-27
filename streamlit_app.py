@@ -7,7 +7,7 @@ from openpyxl.drawing.image import Image
 from openpyxl.utils.units import pixels_to_EMU
 from io import BytesIO
 from datetime import datetime, timezone, timedelta
-from streamlit_javascript import st_javascript
+import streamlit.components.v1 as st_components
 
 # ============================================================
 # 頁面設定
@@ -59,14 +59,37 @@ st.markdown("""
 # ============================================================
 # 偵測使用者瀏覽器時區（用於下載檔名時間戳）
 # ============================================================
-_client_tz_offset = st_javascript("new Date().getTimezoneOffset()")
+# 透過 JS 將瀏覽器時區 offset 寫入 URL query param，Streamlit 讀取後存入 session_state
+if '_client_tz_offset' not in st.session_state:
+    _tz_param = st.query_params.get('_tz')
+    if _tz_param is not None:
+        try:
+            st.session_state._client_tz_offset = int(_tz_param)
+        except (ValueError, TypeError):
+            st.session_state._client_tz_offset = 0
+        del st.query_params['_tz']
+        st.rerun()
+    else:
+        # 首次載入：注入 JS 偵測時區並重導
+        st_components.html("""<script>
+        (function(){
+            try {
+                var url = new URL(window.parent.location.href);
+                if (!url.searchParams.has('_tz')) {
+                    url.searchParams.set('_tz', String(new Date().getTimezoneOffset()));
+                    window.parent.location.replace(url.href);
+                }
+            } catch(e) {}
+        })();
+        </script>""", height=0)
 
 
 def _get_client_now():
     """取得使用者本地時間（根據瀏覽器時區）"""
-    if isinstance(_client_tz_offset, (int, float)) and _client_tz_offset != 0:
+    offset = st.session_state.get('_client_tz_offset')
+    if isinstance(offset, (int, float)):
         # getTimezoneOffset() 回傳「UTC - 本地」的分鐘數，所以要取反
-        client_tz = timezone(timedelta(minutes=-int(_client_tz_offset)))
+        client_tz = timezone(timedelta(minutes=-int(offset)))
         return datetime.now(client_tz)
     # fallback：若尚未取得時區，用 UTC
     return datetime.now(timezone.utc)
