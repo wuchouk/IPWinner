@@ -6,7 +6,8 @@ from openpyxl.drawing.spreadsheet_drawing import TwoCellAnchor, AnchorMarker
 from openpyxl.drawing.image import Image
 from openpyxl.utils.units import pixels_to_EMU
 from io import BytesIO
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+from streamlit_javascript import st_javascript
 
 # ============================================================
 # 頁面設定
@@ -54,6 +55,22 @@ st.markdown("""
 }
 </style>
 """, unsafe_allow_html=True)
+
+# ============================================================
+# 偵測使用者瀏覽器時區（用於下載檔名時間戳）
+# ============================================================
+_client_tz_offset = st_javascript("new Date().getTimezoneOffset()")
+
+
+def _get_client_now():
+    """取得使用者本地時間（根據瀏覽器時區）"""
+    if isinstance(_client_tz_offset, (int, float)) and _client_tz_offset != 0:
+        # getTimezoneOffset() 回傳「UTC - 本地」的分鐘數，所以要取反
+        client_tz = timezone(timedelta(minutes=-int(_client_tz_offset)))
+        return datetime.now(client_tz)
+    # fallback：若尚未取得時區，用 UTC
+    return datetime.now(timezone.utc)
+
 
 # ============================================================
 # 欄位對應設定
@@ -297,10 +314,13 @@ def read_source_data(file_bytes, mapping, db_type=''):
         if db_type == 'db2':
             if _detect_db2_has_region(ws):
                 active_mapping = DB2_MAPPING_WITH_REGION
+                db2_default_region = None
             else:
                 active_mapping = DB2_MAPPING_NO_REGION
+                db2_default_region = 'China'  # 摩知輪本身是中國資料庫
         else:
             active_mapping = mapping
+            db2_default_region = None
 
         # 合併檔需要動態找到標頭列，資料從標頭列 +1 開始
         if db_type == 'merged':
@@ -319,6 +339,10 @@ def read_source_data(file_bytes, mapping, db_type=''):
                 src_idx = col_letter_to_index(src_col_letter)
                 if src_idx < len(row):
                     merged_row[dest_col_letter] = row[src_idx].value
+            # DB2：無地區欄時預設填入 China（摩知輪 = 中國資料庫）
+            if db_type == 'db2' and db2_default_region:
+                if not merged_row.get('D') or str(merged_row['D']).strip() == '':
+                    merged_row['D'] = db2_default_region
             # DB3 資料清理
             if db_type == 'db3':
                 if 'F' in merged_row:
@@ -362,6 +386,9 @@ def read_source_images(file_bytes, src_image_col, db_type=''):
                     'to_row': anchor.to.row,
                     'to_colOff': anchor.to.colOff,
                     'to_rowOff': anchor.to.rowOff,
+                    # 保留原始跨距（DB2 圖片會跨到下一列/欄）
+                    'row_span': anchor.to.row - anchor._from.row,
+                    'col_span': anchor.to.col - anchor._from.col,
                 }
         # 累積偏移：當前 sheet 的資料行數（不含標頭）
         if sheet_idx < len(sheets) - 1:
@@ -443,9 +470,9 @@ def create_merged_file(all_rows, all_images, progress_bar=None):
                 rowOff=img_info.get('from_rowOff', 0),
             )
             _to = AnchorMarker(
-                col=new_col,
+                col=new_col + img_info.get('col_span', 0),
                 colOff=img_info.get('to_colOff', pixels_to_EMU(img.width)),
-                row=new_row,
+                row=new_row + img_info.get('row_span', 0),
                 rowOff=img_info.get('to_rowOff', pixels_to_EMU(img.height)),
             )
             img.anchor = TwoCellAnchor(_from=_from, to=_to)
@@ -642,7 +669,8 @@ if uploaded_files:
                 st.session_state.merge_count = count
                 st.session_state.merge_img_count = len(all_images)
                 st.session_state.merge_logs = logs
-                st.session_state.merge_filename = f"合併檔_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+                client_now = _get_client_now()
+                st.session_state.merge_filename = f"合併檔_{client_now.strftime('%Y%m%d_%H%M')}.xlsx"
                 st.session_state.merge_active_dbs = [
                     (db_key, DB_LABELS[db_key], row_counts.get(db_key, 0), img_counts.get(db_key, 0), len(classified[db_key]))
                     for db_key in DB_LABELS if len(classified[db_key]) > 0
