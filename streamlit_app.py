@@ -126,7 +126,7 @@ def col_letter_to_index(letter):
 def find_merged_header_row(file_bytes):
     """找出合併檔的標頭所在列（掃描 Row 1~5）"""
     try:
-        wb = openpyxl.load_workbook(BytesIO(file_bytes), read_only=True, data_only=True)
+        wb = openpyxl.load_workbook(BytesIO(file_bytes), data_only=True)
         ws = wb.active
         for check_row in range(1, min(6, ws.max_row + 1)):
             headers = set()
@@ -142,37 +142,48 @@ def find_merged_header_row(file_bytes):
     return None
 
 
+def _get_row1_headers(ws):
+    """取得工作表 Row 1 的所有非空值"""
+    headers = set()
+    for cell in ws[1]:
+        if cell.value is not None:
+            headers.add(str(cell.value).strip())
+    return headers
+
+
 def detect_db_type(file_bytes):
     """
     自動辨識檔案來自哪個資料庫。
     回傳 'db1', 'db2', 'db3', 'merged', 或 None（無法辨識）。
+
+    注意：某些 xlsx 在 read_only 模式會讀不到完整資料，
+    因此改用一般模式；DB1 (Markify) 的資料可能不在第一個 sheet，
+    需要掃描所有 sheet。
     """
     try:
-        wb = openpyxl.load_workbook(BytesIO(file_bytes), read_only=True, data_only=True)
+        wb = openpyxl.load_workbook(BytesIO(file_bytes), data_only=True)
+
+        # 先檢查所有 sheet（DB1 Markify 資料在非第一個 sheet）
+        for ws in wb.worksheets:
+            headers_row1 = _get_row1_headers(ws)
+
+            # DB1：英文標頭，含 "Trademark"
+            if 'Trademark' in headers_row1:
+                wb.close()
+                return 'db1'
+
+            # DB2：簡體中文，含 "商标文字"
+            if '商标文字' in headers_row1:
+                wb.close()
+                return 'db2'
+
+            # DB3：繁體中文，含 "他人商標"（Row 1 有 # 和 他人商標）
+            if '他人商標' in headers_row1:
+                wb.close()
+                return 'db3'
+
+        # 都不符合 → 檢查 active sheet 的 Row 2~5（合併檔）
         ws = wb.active
-
-        # 讀取 Row 1 標頭
-        headers_row1 = set()
-        for cell in ws[1]:
-            if cell.value is not None:
-                headers_row1.add(str(cell.value).strip())
-
-        # DB1：英文標頭，含 "Trademark"
-        if 'Trademark' in headers_row1:
-            wb.close()
-            return 'db1'
-
-        # DB2：簡體中文，含 "商标文字"
-        if '商标文字' in headers_row1:
-            wb.close()
-            return 'db2'
-
-        # DB3：繁體中文，含 "他人商標"（Row 1 有資料）
-        if '他人商標' in headers_row1:
-            wb.close()
-            return 'db3'
-
-        # 檢查 Row 2~5 — 可能是合併檔（標頭可能在不同列）
         for check_row in range(2, min(6, ws.max_row + 1)):
             headers_check = set()
             for cell in ws[check_row]:
@@ -188,69 +199,98 @@ def detect_db_type(file_bytes):
         return None
 
 
+def _find_data_sheets(wb, db_type):
+    """找出含有資料的 sheet，掃描所有 tab 避免資料不在 active sheet 的問題"""
+    # 各 DB 的 Row 1 關鍵字
+    db_signature = {
+        'db1': 'Trademark',
+        'db2': '商标文字',
+        'db3': '他人商標',
+    }
+    keyword = db_signature.get(db_type)
+    if keyword:
+        sheets = []
+        for ws in wb.worksheets:
+            headers = _get_row1_headers(ws)
+            if keyword in headers:
+                sheets.append(ws)
+        return sheets if sheets else [wb.active]
+    # merged 或其他：使用 active sheet
+    return [wb.active]
+
+
 def read_source_data(file_bytes, mapping, db_type=''):
     """讀取來源 Excel 並按 mapping 轉換欄位"""
-    wb = openpyxl.load_workbook(BytesIO(file_bytes), read_only=True, data_only=True)
-    ws = wb.active
+    wb = openpyxl.load_workbook(BytesIO(file_bytes), data_only=True)
     rows = []
-    # 合併檔需要動態找到標頭列，資料從標頭列 +1 開始
-    if db_type == 'merged':
-        header_row = find_merged_header_row(file_bytes) or 2
-        data_start = header_row + 1
-    else:
-        data_start = SOURCE_DATA_START
-    for row_idx, row in enumerate(
-        ws.iter_rows(min_row=data_start, values_only=False),
-        start=data_start,
-    ):
-        if row_idx > ws.max_row:
-            break
-        merged_row = {}
-        for src_col_letter, dest_col_letter in mapping.items():
-            src_idx = col_letter_to_index(src_col_letter)
-            if src_idx < len(row):
-                merged_row[dest_col_letter] = row[src_idx].value
-        # DB3 資料清理
-        if db_type == 'db3':
-            if 'F' in merged_row:
-                merged_row['F'] = clean_db3_app_number(merged_row['F'])
-            if 'D' in merged_row:
-                merged_row['D'] = clean_db3_region(merged_row['D'])
-            for date_col in ['H', 'I', 'J']:
-                if date_col in merged_row:
-                    merged_row[date_col] = clean_db3_date(merged_row[date_col])
-            # 空的公告日期 → 1900-01-00、空的異議期限 → 0
-            if not merged_row.get('I') or str(merged_row['I']).strip() == '':
-                merged_row['I'] = '1900-01-00'
-            if not merged_row.get('J') or str(merged_row['J']).strip() == '':
-                merged_row['J'] = '0'
-        if any(v is not None for v in merged_row.values()):
-            rows.append(merged_row)
+
+    sheets = _find_data_sheets(wb, db_type)
+
+    for ws in sheets:
+        # 合併檔需要動態找到標頭列，資料從標頭列 +1 開始
+        if db_type == 'merged':
+            header_row = find_merged_header_row(file_bytes) or 2
+            data_start = header_row + 1
+        else:
+            data_start = SOURCE_DATA_START
+        for row_idx, row in enumerate(
+            ws.iter_rows(min_row=data_start, values_only=False),
+            start=data_start,
+        ):
+            if row_idx > ws.max_row:
+                break
+            merged_row = {}
+            for src_col_letter, dest_col_letter in mapping.items():
+                src_idx = col_letter_to_index(src_col_letter)
+                if src_idx < len(row):
+                    merged_row[dest_col_letter] = row[src_idx].value
+            # DB3 資料清理
+            if db_type == 'db3':
+                if 'F' in merged_row:
+                    merged_row['F'] = clean_db3_app_number(merged_row['F'])
+                if 'D' in merged_row:
+                    merged_row['D'] = clean_db3_region(merged_row['D'])
+                for date_col in ['H', 'I', 'J']:
+                    if date_col in merged_row:
+                        merged_row[date_col] = clean_db3_date(merged_row[date_col])
+                # 空的公告日期 → 1900-01-00、空的異議期限 → 0
+                if not merged_row.get('I') or str(merged_row['I']).strip() == '':
+                    merged_row['I'] = '1900-01-00'
+                if not merged_row.get('J') or str(merged_row['J']).strip() == '':
+                    merged_row['J'] = '0'
+            if any(v is not None for v in merged_row.values()):
+                rows.append(merged_row)
     wb.close()
     return rows
 
 
-def read_source_images(file_bytes, src_image_col):
+def read_source_images(file_bytes, src_image_col, db_type=''):
     """讀取來源檔案中的圖片"""
     wb = openpyxl.load_workbook(BytesIO(file_bytes))
-    ws = wb.active
     images = {}
-    for img in ws._images:
-        anchor = img.anchor
-        if hasattr(anchor, '_from') and anchor._from.col == src_image_col:
-            src_row = anchor._from.row
-            img_data = BytesIO(img._data())
-            images[src_row] = {
-                'data': img_data,
-                'width': img.width,
-                'height': img.height,
-                'from_colOff': anchor._from.colOff,
-                'from_rowOff': anchor._from.rowOff,
-                'to_col': anchor.to.col,
-                'to_row': anchor.to.row,
-                'to_colOff': anchor.to.colOff,
-                'to_rowOff': anchor.to.rowOff,
-            }
+    sheets = _find_data_sheets(wb, db_type)
+    row_offset_accum = 0  # 多 sheet 時累積行數偏移
+
+    for sheet_idx, ws in enumerate(sheets):
+        for img in ws._images:
+            anchor = img.anchor
+            if hasattr(anchor, '_from') and anchor._from.col == src_image_col:
+                src_row = anchor._from.row + row_offset_accum
+                img_data = BytesIO(img._data())
+                images[src_row] = {
+                    'data': img_data,
+                    'width': img.width,
+                    'height': img.height,
+                    'from_colOff': anchor._from.colOff,
+                    'from_rowOff': anchor._from.rowOff,
+                    'to_col': anchor.to.col,
+                    'to_row': anchor.to.row,
+                    'to_colOff': anchor.to.colOff,
+                    'to_rowOff': anchor.to.rowOff,
+                }
+        # 累積偏移：當前 sheet 的資料行數（不含標頭）
+        if sheet_idx < len(sheets) - 1:
+            row_offset_accum += ws.max_row - SOURCE_DATA_START + 1
     wb.close()
     return images
 
@@ -485,7 +525,7 @@ if uploaded_files:
                             0.05 + 0.20 * (step / total_steps),
                             text=f'讀取 {label} 圖片：{fname}...',
                         )
-                        images = read_source_images(file_bytes, config['img_col'])
+                        images = read_source_images(file_bytes, config['img_col'], db_type=db_key)
                         logs.append(f"{label} / {fname}：{len(images)} 張圖片")
 
                         # 計算圖片位移
