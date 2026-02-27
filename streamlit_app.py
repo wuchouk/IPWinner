@@ -17,9 +17,32 @@ st.set_page_config(
     layout="centered",
 )
 
-# 自訂 CSS：讓上傳的檔案列表一次顯示更多（預設 3 個太少）
+# 自訂 CSS：拖放上傳區域放大 + 視覺提示 + 檔案列表一次顯示更多
 st.markdown("""
 <style>
+/* ---- 放大拖放上傳區域 ---- */
+[data-testid="stFileUploaderDropzone"] {
+    min-height: 220px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    border: 2px dashed #b0b8c8;
+    border-radius: 12px;
+    background: #f8fafd;
+    transition: border-color 0.2s, background 0.2s;
+}
+[data-testid="stFileUploaderDropzone"]:hover {
+    border-color: #4F8BF9;
+    background: #eef3fc;
+}
+/* 讓拖放區域內的文字和按鈕居中 */
+[data-testid="stFileUploaderDropzone"] > div {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+}
 /* 擴大 file_uploader 的檔案列表可視區域，一次顯示最多 10 個 */
 [data-testid="stFileUploaderFileList"] {
     max-height: 500px;
@@ -466,10 +489,10 @@ if 'uploader_key' not in st.session_state:
 
 # 單一上傳窗口
 uploaded_files = st.file_uploader(
-    "選擇要合併的 Excel 檔案",
+    "將檔案拖放至此處，或點擊 Browse files 選擇檔案",
     type=["xlsx"],
     accept_multiple_files=True,
-    help="支援同時上傳多個檔案，系統會自動辨識來自哪個資料庫",
+    help="支援同時上傳多個 .xlsx 檔案，系統會自動辨識來自哪個資料庫",
     key=f"file_uploader_{st.session_state.uploader_key}",
 )
 
