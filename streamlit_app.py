@@ -8,6 +8,7 @@ from openpyxl.utils.units import pixels_to_EMU
 from io import BytesIO
 from datetime import datetime, timezone, timedelta
 import streamlit.components.v1 as st_components
+import os, tempfile
 
 # ============================================================
 # 頁面設定
@@ -44,14 +45,16 @@ st.markdown("""
     align-items: center;
     gap: 4px;
 }
-/* 擴大 file_uploader 的檔案列表可視區域，一次顯示最多 10 個 */
-[data-testid="stFileUploaderFileList"] {
-    max-height: 500px;
-    overflow-y: auto;
+/* 隱藏 file_uploader 分頁按鈕 */
+[data-testid="stFileUploader"] nav[role="navigation"],
+[data-testid="stFileUploader"] [data-testid="stPagination"],
+[data-testid="stFileUploader"] .stPagination {
+    display: none !important;
 }
-/* 隱藏 file_uploader 內建的分頁按鈕 */
-[data-testid="stFileUploaderFileList"] [data-testid="stPagination"] {
-    display: none;
+/* 檔案列表容器高度 */
+[data-testid="stFileUploader"] [data-testid="stFileUploaderFileList"] {
+    max-height: 700px !important;
+    overflow-y: auto !important;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -59,39 +62,39 @@ st.markdown("""
 # ============================================================
 # 偵測使用者瀏覽器時區（用於下載檔名時間戳）
 # ============================================================
-# 透過 JS 將瀏覽器時區 offset 寫入 URL query param，Streamlit 讀取後存入 session_state
-if '_client_tz_offset' not in st.session_state:
-    _tz_param = st.query_params.get('_tz')
-    if _tz_param is not None:
-        try:
-            st.session_state._client_tz_offset = int(_tz_param)
-        except (ValueError, TypeError):
-            st.session_state._client_tz_offset = 0
-        del st.query_params['_tz']
-        st.rerun()
-    else:
-        # 首次載入：注入 JS 偵測時區並重導
-        st_components.html("""<script>
-        (function(){
-            try {
-                var url = new URL(window.parent.location.href);
-                if (!url.searchParams.has('_tz')) {
-                    url.searchParams.set('_tz', String(new Date().getTimezoneOffset()));
-                    window.parent.location.replace(url.href);
-                }
-            } catch(e) {}
-        })();
-        </script>""", height=0)
+@st.cache_resource
+def _create_tz_component():
+    """建立瀏覽器時區偵測元件（使用 Streamlit declare_component）"""
+    comp_dir = os.path.join(tempfile.gettempdir(), "_st_tz_detect")
+    os.makedirs(comp_dir, exist_ok=True)
+    with open(os.path.join(comp_dir, "index.html"), "w") as f:
+        f.write("""<!DOCTYPE html>
+<html><body><script>
+function send(type, data) {
+    window.parent.postMessage(
+        Object.assign({isStreamlitMessage: true, type: type}, data), "*"
+    );
+}
+send("streamlit:componentReady", {apiVersion: 1});
+window.addEventListener("message", function(event) {
+    if (event.data.type === "streamlit:render") {
+        send("streamlit:setComponentValue",
+             {value: new Date().getTimezoneOffset()});
+    }
+});
+</script></body></html>""")
+    return st_components.declare_component("_tz_detect", path=comp_dir)
+
+_tz_component = _create_tz_component()
+_client_tz_offset = _tz_component(default=0, key="_tz_offset", height=0)
 
 
 def _get_client_now():
     """取得使用者本地時間（根據瀏覽器時區）"""
-    offset = st.session_state.get('_client_tz_offset')
-    if isinstance(offset, (int, float)):
+    if isinstance(_client_tz_offset, (int, float)):
         # getTimezoneOffset() 回傳「UTC - 本地」的分鐘數，所以要取反
-        client_tz = timezone(timedelta(minutes=-int(offset)))
+        client_tz = timezone(timedelta(minutes=-int(_client_tz_offset)))
         return datetime.now(client_tz)
-    # fallback：若尚未取得時區，用 UTC
     return datetime.now(timezone.utc)
 
 
@@ -546,6 +549,31 @@ uploaded_files = st.file_uploader(
     key=f"file_uploader_{st.session_state.uploader_key}",
 )
 
+# 注入 JS 強制顯示所有已上傳檔案（移除 Streamlit 內建的分頁隱藏）
+# st_components.html 的 iframe 有 allow-same-origin，可以存取 parent document
+if uploaded_files and len(uploaded_files) > 3:
+    st_components.html("""<script>
+    (function(){
+        try {
+            var doc = window.parent.document;
+            function showAll() {
+                var items = doc.querySelectorAll(
+                    '[data-testid="stFileUploaderFile"]'
+                );
+                items.forEach(function(el){ el.style.display = 'flex'; });
+                var pag = doc.querySelectorAll(
+                    '[data-testid="stFileUploader"] nav[role="navigation"], ' +
+                    '[data-testid="stFileUploader"] [data-testid="stPagination"]'
+                );
+                pag.forEach(function(el){ el.style.display = 'none'; });
+            }
+            showAll();
+            setTimeout(showAll, 500);
+            setTimeout(showAll, 1500);
+        } catch(e) { /* sandbox 擋住就算了，CSS 會處理分頁隱藏 */ }
+    })();
+    </script>""", height=0)
+
 # 檢查上傳數量
 if uploaded_files and len(uploaded_files) > 15:
     st.error("⚠️ 最多只能上傳 15 個檔案，請減少檔案數量。")
@@ -707,8 +735,27 @@ if uploaded_files:
                 with st.expander("錯誤詳情"):
                     st.code(traceback.format_exc())
 
-    # 下載後自動重置的 callback
+    # 下載後自動重置的 callback（同時寫入合併紀錄）
     def _reset_after_download():
+        # 寫入合併紀錄
+        if 'merge_history' not in st.session_state:
+            st.session_state.merge_history = []
+            st.session_state.merge_history_date = _get_client_now().strftime('%Y-%m-%d')
+        # 每日清空
+        today = _get_client_now().strftime('%Y-%m-%d')
+        if st.session_state.get('merge_history_date') != today:
+            st.session_state.merge_history = []
+            st.session_state.merge_history_date = today
+        # 記錄本次合併
+        record = {
+            'time': _get_client_now().strftime('%H:%M'),
+            'filename': st.session_state.get('merge_filename', ''),
+            'logs': st.session_state.get('merge_logs', []),
+            'count': st.session_state.get('merge_count', 0),
+            'img_count': st.session_state.get('merge_img_count', 0),
+        }
+        st.session_state.merge_history.append(record)
+        # 清除本次合併的暫存
         for key in ['merge_done', 'merge_output', 'merge_count', 'merge_img_count',
                      'merge_logs', 'merge_filename', 'merge_active_dbs']:
             st.session_state.pop(key, None)
@@ -743,6 +790,30 @@ if uploaded_files:
         with st.expander("📝 執行記錄"):
             for log in st.session_state.merge_logs:
                 st.text(log)
+
+# ============================================================
+# 合併紀錄（當日有效，每天清空）
+# ============================================================
+# 每日清空檢查
+if 'merge_history' in st.session_state:
+    today = _get_client_now().strftime('%Y-%m-%d')
+    if st.session_state.get('merge_history_date') != today:
+        st.session_state.merge_history = []
+        st.session_state.merge_history_date = today
+
+if st.session_state.get('merge_history'):
+    st.divider()
+    with st.expander(f"📋 今日合併紀錄（{len(st.session_state.merge_history)} 次）", expanded=False):
+        for i, rec in enumerate(reversed(st.session_state.merge_history), 1):
+            st.markdown(f"**{i}. {rec['time']}　→　{rec['filename']}**　"
+                        f"（{rec['count']} 筆 / {rec['img_count']} 張圖片）")
+            # 顯示來源檔案清單
+            for log_line in rec['logs']:
+                if log_line.startswith('──'):
+                    break
+                st.caption(f"　　{log_line}")
+            if i < len(st.session_state.merge_history):
+                st.markdown("---")
 
 # 頁尾
 st.divider()
