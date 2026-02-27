@@ -217,8 +217,8 @@ MERGED_HEADERS = [
     '商品/服務名稱（原文）', '商品/服務名稱（英文翻譯）',
 ]
 MERGED_IMAGE_COL = 2
-MERGED_HEADER_ROW = 2
-MERGED_DATA_START = 3
+MERGED_HEADER_ROW = 3
+MERGED_DATA_START = 4
 SOURCE_DATA_START = 2
 
 
@@ -437,6 +437,7 @@ def create_merged_file(all_rows, all_images, progress_bar=None):
         top=Side(style='thin'), bottom=Side(style='thin'),
     )
     data_font = Font(name='Arial', size=10)
+    left_align = Alignment(horizontal='left', vertical='center')
 
     for col_idx, header in enumerate(MERGED_HEADERS, start=1):
         cell = ws.cell(row=MERGED_HEADER_ROW, column=col_idx, value=header)
@@ -453,8 +454,13 @@ def create_merged_file(all_rows, all_images, progress_bar=None):
         for cl in col_letters:
             ci = col_letter_to_index(cl) + 1
             v = row_data.get(cl)
+            # 申請號（F 欄）：強制存為文字並靠左對齊
+            if cl == 'F' and v is not None:
+                v = str(v).strip()
             cell = ws.cell(row=row_num, column=ci, value=v if v is not None else '')
             cell.font = data_font
+            if cl == 'F':
+                cell.alignment = left_align
         if progress_bar and i % 50 == 0:
             progress_bar.progress(
                 0.3 + 0.3 * (i / max(total, 1)),
@@ -511,7 +517,7 @@ def create_merged_file(all_rows, all_images, progress_bar=None):
                 text=f'寫入圖片 {idx}/{img_total}...',
             )
 
-    ws.freeze_panes = 'A3'
+    ws.freeze_panes = 'A4'
     last_row = MERGED_HEADER_ROW + len(all_rows)
     ws.auto_filter.ref = f'A{MERGED_HEADER_ROW}:L{last_row}'
 
