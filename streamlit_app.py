@@ -17,6 +17,21 @@ st.set_page_config(
     layout="centered",
 )
 
+# 自訂 CSS：讓上傳的檔案列表一次顯示更多（預設 3 個太少）
+st.markdown("""
+<style>
+/* 擴大 file_uploader 的檔案列表可視區域，一次顯示最多 10 個 */
+[data-testid="stFileUploaderFileList"] {
+    max-height: 500px;
+    overflow-y: auto;
+}
+/* 隱藏 file_uploader 內建的分頁按鈕 */
+[data-testid="stFileUploaderFileList"] [data-testid="stPagination"] {
+    display: none;
+}
+</style>
+""", unsafe_allow_html=True)
+
 # ============================================================
 # 欄位對應設定
 # ============================================================
@@ -26,11 +41,39 @@ DB1_MAPPING = {
 }
 DB1_IMAGE_SRC_COL = 1
 
-DB2_MAPPING = {
-    'B': 'B', 'C': 'C', 'D': 'D', 'E': 'E', 'F': 'F',
-    'G': 'G', 'H': 'H', 'I': 'I', 'K': 'J', 'M': 'K',
+# DB2 有兩種格式：
+# 格式 A（有地區欄）：A:序号, B:商标文字, C:商标图样, D:地區, E:类别, F:申请号, G:申请人, H:申请日期, I:初审公告日期, J:初审公告期号, K:异议截止日期, L:群组, M:商品/服务
+# 格式 B（無地區欄）：A:序号, B:商标文字, C:商标图样, D:类别, E:申请号, F:申请人, G:申请日期, H:初审公告日期, I:初审公告期号, J:异议截止日期, K:群组, L:商品/服务
+DB2_MAPPING_WITH_REGION = {
+    'B': 'B',   # 商标文字 → 他人商標
+    'C': 'C',   # 商标图样 → 商標圖樣
+    'D': 'D',   # 地區 → 地區
+    'E': 'E',   # 类别 → 商標類別
+    'F': 'F',   # 申请号 → 申請號
+    'G': 'G',   # 申请人 → 申請人
+    'H': 'H',   # 申请日期 → 申請日期
+    'I': 'I',   # 初审公告日期 → 公告日期
+    'K': 'J',   # 异议截止日期 → 異議期限
+    'M': 'K',   # 商品/服务 → 商品/服務名稱（原文）
+}
+DB2_MAPPING_NO_REGION = {
+    'B': 'B',   # 商标文字 → 他人商標
+    'C': 'C',   # 商标图样 → 商標圖樣
+    'D': 'E',   # 类别 → 商標類別
+    'E': 'F',   # 申请号 → 申請號
+    'F': 'G',   # 申请人 → 申請人
+    'G': 'H',   # 申请日期 → 申請日期
+    'H': 'I',   # 初审公告日期 → 公告日期
+    'J': 'J',   # 异议截止日期 → 異議期限
+    'L': 'K',   # 商品/服务 → 商品/服務名稱（原文）
 }
 DB2_IMAGE_SRC_COL = 2
+
+
+def _detect_db2_has_region(ws):
+    """偵測 DB2 工作表是否含有「地區」欄位（在 Row 1 的 D 欄）"""
+    headers = _get_row1_headers(ws)
+    return '地區' in headers
 
 DB3_MAPPING = {
     'B': 'B', 'C': 'C',
@@ -227,6 +270,15 @@ def read_source_data(file_bytes, mapping, db_type=''):
     sheets = _find_data_sheets(wb, db_type)
 
     for ws in sheets:
+        # DB2：動態偵測該 sheet 是否含有「地區」欄位，選用對應的 mapping
+        if db_type == 'db2':
+            if _detect_db2_has_region(ws):
+                active_mapping = DB2_MAPPING_WITH_REGION
+            else:
+                active_mapping = DB2_MAPPING_NO_REGION
+        else:
+            active_mapping = mapping
+
         # 合併檔需要動態找到標頭列，資料從標頭列 +1 開始
         if db_type == 'merged':
             header_row = find_merged_header_row(file_bytes) or 2
@@ -240,7 +292,7 @@ def read_source_data(file_bytes, mapping, db_type=''):
             if row_idx > ws.max_row:
                 break
             merged_row = {}
-            for src_col_letter, dest_col_letter in mapping.items():
+            for src_col_letter, dest_col_letter in active_mapping.items():
                 src_idx = col_letter_to_index(src_col_letter)
                 if src_idx < len(row):
                     merged_row[dest_col_letter] = row[src_idx].value
@@ -491,7 +543,7 @@ if uploaded_files:
                 db_configs = {
                     'merged': {'mapping': MERGED_FILE_MAPPING, 'img_col': MERGED_FILE_IMAGE_SRC_COL},
                     'db1': {'mapping': DB1_MAPPING, 'img_col': DB1_IMAGE_SRC_COL},
-                    'db2': {'mapping': DB2_MAPPING, 'img_col': DB2_IMAGE_SRC_COL},
+                    'db2': {'mapping': DB2_MAPPING_NO_REGION, 'img_col': DB2_IMAGE_SRC_COL},
                     'db3': {'mapping': DB3_MAPPING, 'img_col': DB3_IMAGE_SRC_COL},
                 }
 
