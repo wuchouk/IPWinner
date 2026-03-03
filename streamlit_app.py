@@ -181,6 +181,29 @@ def clean_db3_date(value):
     return value
 
 
+def clean_class_column(value):
+    """清理商標類別（E 欄）：去空格、頓號分隔、去前導 0。
+    例如 '09 11 43' → '9、11、43'，'9, 11, 43' → '9、11、43'"""
+    if not value:
+        return value
+    text = str(value).strip()
+    if not text:
+        return text
+    # 以逗號、頓號、空白拆分
+    parts = re.split(r'[,、\s]+', text)
+    # 去前導 0 並過濾空字串
+    cleaned = []
+    for p in parts:
+        p = p.strip()
+        if not p:
+            continue
+        # 去前導 0（純數字才處理）
+        if p.isdigit():
+            p = str(int(p))
+        cleaned.append(p)
+    return '、'.join(cleaned) if cleaned else text
+
+
 def clean_db3_app_number(value):
     """去除申請號的前綴，例如 'App 26000442' → '26000442'"""
     if not value or not isinstance(value, str):
@@ -437,7 +460,8 @@ def create_merged_file(all_rows, all_images, progress_bar=None):
         top=Side(style='thin'), bottom=Side(style='thin'),
     )
     data_font = Font(name='Arial', size=10)
-    left_align = Alignment(horizontal='left', vertical='center')
+    align_center_top = Alignment(horizontal='center', vertical='top', wrap_text=True)
+    align_left_top = Alignment(horizontal='left', vertical='top', wrap_text=True)
 
     for col_idx, header in enumerate(MERGED_HEADERS, start=1):
         cell = ws.cell(row=MERGED_HEADER_ROW, column=col_idx, value=header)
@@ -450,17 +474,21 @@ def create_merged_file(all_rows, all_images, progress_bar=None):
     col_letters = ['B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L']
     for i, row_data in enumerate(all_rows):
         row_num = MERGED_DATA_START + i
-        ws.cell(row=row_num, column=1, value=f'=ROW()-{MERGED_HEADER_ROW}')
+        num_cell = ws.cell(row=row_num, column=1, value=f'=ROW()-{MERGED_HEADER_ROW}')
+        num_cell.font = data_font
+        num_cell.alignment = align_center_top
         for cl in col_letters:
             ci = col_letter_to_index(cl) + 1
             v = row_data.get(cl)
-            # 申請號（F 欄）：強制存為文字並靠左對齊
+            # 申請號（F 欄）：強制存為文字
             if cl == 'F' and v is not None:
                 v = str(v).strip()
+            # 商標類別（E 欄）：去空格、頓號分隔、去前導 0
+            if cl == 'E' and v is not None:
+                v = clean_class_column(v)
             cell = ws.cell(row=row_num, column=ci, value=v if v is not None else '')
             cell.font = data_font
-            if cl == 'F':
-                cell.alignment = left_align
+            cell.alignment = align_left_top
         if progress_bar and i % 50 == 0:
             progress_bar.progress(
                 0.3 + 0.3 * (i / max(total, 1)),
@@ -468,14 +496,14 @@ def create_merged_file(all_rows, all_images, progress_bar=None):
             )
 
     col_widths = {
-        'A': 6, 'B': 30, 'C': 12, 'D': 20, 'E': 12,
-        'F': 18, 'G': 30, 'H': 14, 'I': 14, 'J': 14, 'K': 40, 'L': 40,
+        'A': 4, 'B': 23, 'C': 23, 'D': 15, 'E': 15,
+        'F': 16, 'G': 25, 'H': 15, 'I': 20, 'J': 20, 'K': 60, 'L': 60,
     }
     for cl, w in col_widths.items():
         ws.column_dimensions[cl].width = w
 
     for r in range(MERGED_DATA_START, MERGED_DATA_START + total):
-        ws.row_dimensions[r].height = 50
+        ws.row_dimensions[r].height = 100
 
     img_total = len(all_images)
     for idx, (img_info, row_offset) in enumerate(all_images):
