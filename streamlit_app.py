@@ -525,8 +525,8 @@ def create_merged_file(all_rows, all_images, progress_bar=None):
                 img.height = int(img.height * ratio)
             new_row = img_info['orig_row'] + row_offset
             new_col = MERGED_IMAGE_COL
-            # 圖片頂部至少留 50000 EMU (~3.8pt) 的間距，避免壓到上方框線
-            MIN_ROW_OFF = 50000
+            # 圖片頂部至少留 100000 EMU (~7.6pt) 的間距，避免壓到上方框線
+            MIN_ROW_OFF = 100000
             orig_row_off = img_info.get('from_rowOff', 0)
             row_off = max(orig_row_off, MIN_ROW_OFF)
             _from = AnchorMarker(
