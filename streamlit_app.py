@@ -10,8 +10,7 @@ from datetime import datetime, timezone, timedelta
 import streamlit.components.v1 as st_components
 import os, tempfile
 
-APP_VERSION = "v7"
-APP_LAST_UPDATE = "2026-03-03"
+APP_VERSION = "v7.1"
 
 # ============================================================
 # 頁面設定
@@ -859,4 +858,4 @@ if st.session_state.get('merge_history'):
 # 頁尾
 st.divider()
 st.caption("商標監控資料合併工具 · 輸出為簡易版格式（無標題列），可事後手動加上事務所標題。")
-st.caption(f"{APP_VERSION} · Last updated {APP_LAST_UPDATE}")
+st.caption(f"{APP_VERSION} · Last updated {_get_client_now().strftime('%Y-%m-%d %H:%M')}")
