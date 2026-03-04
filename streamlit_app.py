@@ -8,7 +8,7 @@ from openpyxl.utils.units import pixels_to_EMU
 from io import BytesIO
 from datetime import datetime, timezone, timedelta
 import streamlit.components.v1 as st_components
-import os, tempfile
+import os, tempfile, json
 
 APP_VERSION = "v9"
 
@@ -98,6 +98,37 @@ def _get_client_now():
         client_tz = timezone(timedelta(minutes=-int(_client_tz_offset)))
         return datetime.now(client_tz)
     return datetime.now(timezone.utc)
+
+
+# ============================================================
+# 合併紀錄持久化（JSON 檔案）
+# ============================================================
+_HISTORY_FILE = os.path.join(os.path.dirname(__file__), '.merge_history.json')
+
+
+def _load_merge_history():
+    """從 JSON 檔讀取今日合併紀錄；若非今日或檔案不存在則回傳空 list"""
+    try:
+        with open(_HISTORY_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        if data.get('date') == _get_client_now().strftime('%Y-%m-%d'):
+            return data.get('records', [])
+    except (FileNotFoundError, json.JSONDecodeError, ValueError):
+        pass
+    return []
+
+
+def _save_merge_history(records):
+    """將合併紀錄寫入 JSON 檔（含今日日期）"""
+    data = {
+        'date': _get_client_now().strftime('%Y-%m-%d'),
+        'records': records,
+    }
+    try:
+        with open(_HISTORY_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except OSError:
+        pass  # Streamlit Cloud 等環境可能寫入失敗，靜默處理
 
 
 # ============================================================
@@ -891,17 +922,10 @@ if uploaded_files:
                 with st.expander("錯誤詳情"):
                     st.code(traceback.format_exc())
 
-    # 下載後自動重置的 callback（同時寫入合併紀錄）
+    # 下載後自動重置的 callback（同時寫入合併紀錄到 JSON 檔）
     def _reset_after_download():
-        # 寫入合併紀錄
-        if 'merge_history' not in st.session_state:
-            st.session_state.merge_history = []
-            st.session_state.merge_history_date = _get_client_now().strftime('%Y-%m-%d')
-        # 每日清空
-        today = _get_client_now().strftime('%Y-%m-%d')
-        if st.session_state.get('merge_history_date') != today:
-            st.session_state.merge_history = []
-            st.session_state.merge_history_date = today
+        # 從 JSON 檔讀取既有紀錄
+        history = _load_merge_history()
         # 記錄本次合併
         record = {
             'time': _get_client_now().strftime('%H:%M'),
@@ -910,7 +934,8 @@ if uploaded_files:
             'count': st.session_state.get('merge_count', 0),
             'img_count': st.session_state.get('merge_img_count', 0),
         }
-        st.session_state.merge_history.append(record)
+        history.append(record)
+        _save_merge_history(history)
         # 清除本次合併的暫存
         for key in ['merge_done', 'merge_output', 'merge_count', 'merge_img_count',
                      'merge_logs', 'merge_filename', 'merge_active_dbs']:
@@ -948,27 +973,20 @@ if uploaded_files:
                 st.text(log)
 
 # ============================================================
-# 合併紀錄（當日有效，每天清空）
+# 合併紀錄（從 JSON 檔讀取，當日有效，隔日自動清空）
 # ============================================================
-# 每日清空檢查
-if 'merge_history' in st.session_state:
-    today = _get_client_now().strftime('%Y-%m-%d')
-    if st.session_state.get('merge_history_date') != today:
-        st.session_state.merge_history = []
-        st.session_state.merge_history_date = today
-
-if st.session_state.get('merge_history'):
+_persisted_history = _load_merge_history()
+if _persisted_history:
     st.divider()
-    with st.expander(f"📋 今日合併紀錄（{len(st.session_state.merge_history)} 次）", expanded=False):
-        for i, rec in enumerate(reversed(st.session_state.merge_history), 1):
+    with st.expander(f"📋 今日合併紀錄（{len(_persisted_history)} 次）", expanded=False):
+        for i, rec in enumerate(reversed(_persisted_history), 1):
             st.markdown(f"**{i}. {rec['time']}　→　{rec['filename']}**　"
                         f"（{rec['count']} 筆 / {rec['img_count']} 張圖片）")
-            # 顯示來源檔案清單
             for log_line in rec['logs']:
                 if log_line.startswith('──'):
                     break
                 st.caption(f"　　{log_line}")
-            if i < len(st.session_state.merge_history):
+            if i < len(_persisted_history):
                 st.markdown("---")
 
 # 頁尾
