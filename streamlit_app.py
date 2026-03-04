@@ -8,10 +8,30 @@ from openpyxl.utils.units import pixels_to_EMU
 from io import BytesIO
 from datetime import datetime, timezone, timedelta
 import streamlit.components.v1 as st_components
-import os, tempfile, json
+import os, tempfile, json, subprocess
 
 APP_VERSION = "v9.1"
-APP_LAST_UPDATE = "2026-03-04 12:11"
+
+
+def _get_git_commit_utc():
+    """從 git log 取得最新 commit 的 UTC 時間（datetime 物件）"""
+    try:
+        result = subprocess.run(
+            ['git', 'log', '-1', '--format=%ci'],
+            capture_output=True, text=True, timeout=5,
+            cwd=os.path.dirname(__file__),
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            # git 輸出格式：2026-03-04 19:32:32 +0000
+            raw = result.stdout.strip()
+            dt = datetime.strptime(raw, '%Y-%m-%d %H:%M:%S %z')
+            return dt.astimezone(timezone.utc)
+    except Exception:
+        pass
+    return None
+
+
+_GIT_COMMIT_UTC = _get_git_commit_utc()
 
 # ============================================================
 # 頁面設定
@@ -993,4 +1013,13 @@ if _persisted_history:
 # 頁尾
 st.divider()
 st.caption("商標監控資料合併工具 · 輸出為簡易版格式（無標題列），可事後手動加上事務所標題。")
-st.caption(f"{APP_VERSION} · Last updated {APP_LAST_UPDATE}")
+if _GIT_COMMIT_UTC:
+    # 將 git commit UTC 時間轉為使用者本地時區
+    if isinstance(_client_tz_offset, (int, float)):
+        _client_tz = timezone(timedelta(minutes=-int(_client_tz_offset)))
+        _last_update_local = _GIT_COMMIT_UTC.astimezone(_client_tz)
+    else:
+        _last_update_local = _GIT_COMMIT_UTC
+    st.caption(f"{APP_VERSION} · Last updated {_last_update_local.strftime('%Y-%m-%d %H:%M')}")
+else:
+    st.caption(f"{APP_VERSION}")
