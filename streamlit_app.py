@@ -490,18 +490,62 @@ def create_merged_file(all_rows, all_images, progress_bar=None):
     align_center_top = Alignment(horizontal='center', vertical='top', wrap_text=True)
     align_left_top = Alignment(horizontal='left', vertical='top', wrap_text=True)
 
-    # ── Row 1：LOGO 置中（A1:L1 合併） ──
+    # ── Row 1：LOGO 水平＋垂直置中（A1:L1 合併） ──
     ws.merge_cells('A1:L1')
     ws.row_dimensions[1].height = 58
     ws['A1'].alignment = Alignment(horizontal='center', vertical='center')
-    # 插入 LOGO 圖片
+    # 插入 LOGO 圖片（精確置中於合併儲存格）
     logo_path = os.path.join(os.path.dirname(__file__), 'logo.jpg')
     if os.path.exists(logo_path):
         logo_img = Image(logo_path)
-        # 保持原圖比例，高度配合 row 1
         logo_img.height = 55
         logo_img.width = int(logo_img.height * (863 / 133))  # 保持範本比例
-        logo_img.anchor = 'A1'
+
+        # 計算各欄寬度（像素）以求出水平置中偏移
+        _cw_chars = [4, 23, 23, 15, 15, 16, 25, 15, 20, 20, 60, 60]  # A~L
+        _cw_px = [int(w * 7 + 5) for w in _cw_chars]
+        _total_px = sum(_cw_px)
+        _left_px = (_total_px - logo_img.width) / 2  # 左留白（像素）
+
+        # 找出 LOGO 起始落在第幾欄、欄內偏移多少
+        _cum = 0
+        _logo_col, _logo_col_off_px = 0, 0
+        for _i, _cpx in enumerate(_cw_px):
+            if _cum + _cpx > _left_px:
+                _logo_col = _i
+                _logo_col_off_px = int(_left_px - _cum)
+                break
+            _cum += _cpx
+
+        # 垂直置中：row height 58pt → EMU；圖片高度 → EMU
+        _row_h_emu = int(58 * 12700)
+        _img_h_emu = pixels_to_EMU(logo_img.height)
+        _row_off_emu = max(0, (_row_h_emu - _img_h_emu) // 2)
+
+        # 計算 LOGO 結束位置
+        _right_px = _left_px + logo_img.width
+        _cum2 = 0
+        _logo_to_col, _logo_to_col_off_px = len(_cw_px) - 1, _cw_px[-1]
+        for _i, _cpx in enumerate(_cw_px):
+            if _cum2 + _cpx >= _right_px:
+                _logo_to_col = _i
+                _logo_to_col_off_px = int(_right_px - _cum2)
+                break
+            _cum2 += _cpx
+
+        _from_marker = AnchorMarker(
+            col=_logo_col,
+            colOff=pixels_to_EMU(_logo_col_off_px),
+            row=0,
+            rowOff=_row_off_emu,
+        )
+        _to_marker = AnchorMarker(
+            col=_logo_to_col,
+            colOff=pixels_to_EMU(_logo_to_col_off_px),
+            row=0,
+            rowOff=_row_off_emu + _img_h_emu,
+        )
+        logo_img.anchor = TwoCellAnchor(_from=_from_marker, to=_to_marker)
         ws.add_image(logo_img)
 
     # ── Row 2：監控商標 / 監控地區 / 監控類別（留空讓使用者手動填寫） ──
