@@ -10,7 +10,7 @@ from datetime import datetime, timezone, timedelta
 import streamlit.components.v1 as st_components
 import os, tempfile
 
-APP_VERSION = "v7.1"
+APP_VERSION = "v8"
 
 # ============================================================
 # 頁面設定
@@ -166,21 +166,43 @@ MONTH_MAP = {
 }
 
 
-def clean_db3_date(value):
-    """將 DB3 日期格式轉為 YYYY-MM-DD，例如 '02-JAN-2026' → '2026-01-02'"""
-    if not value or not isinstance(value, str):
-        return value
-    value = value.strip()
-    # 去除前綴 "App: " 或 "Opp "
-    value = re.sub(r'^(App:\s*|Opp\s+)', '', value)
-    # 轉換 DD-MON-YYYY → YYYY-MM-DD
-    m = re.match(r'^(\d{1,2})-([A-Z]{3})-(\d{4})$', value)
+def _convert_ddmonyyyy(text):
+    """DD-MON-YYYY → YYYY-MM-DD，例如 '02-JAN-2026' → '2026-01-02'。
+    無法辨識則回傳原文。"""
+    m = re.match(r'^(\d{1,2})-([A-Z]{3})-(\d{4})$', text.strip())
     if m:
         day, mon, year = m.groups()
         month_num = MONTH_MAP.get(mon)
         if month_num:
             return f'{year}-{month_num}-{day.zfill(2)}'
-    return value
+    return text
+
+
+def clean_db3_date(value):
+    """將 DB3 日期格式轉為 YYYY-MM-DD，例如 'Reg: 22-AUG-2025' → '2025-08-22'。
+    不管前綴是什麼（App: / Reg: / Opp 等）都去除，只保留日期並轉換格式。"""
+    if not value or not isinstance(value, str):
+        return value
+    value = value.strip()
+    # 去除任何英文前綴（含冒號和空格），只保留日期部分
+    value = re.sub(r'^[A-Za-z]+[:\s]*\s*', '', value)
+    return _convert_ddmonyyyy(value)
+
+
+def clean_db3_opposition(value):
+    """清理異議期限（J 欄）：去 Opp 前綴，並將所有 DD-MMM-YYYY 轉為 YYYY-MM-DD。
+    保留其餘文字不動。
+    例如 'Opp CN : 30-APR-2026\\nCA : 2 months...' → 'CN : 2026-04-30\\nCA : 2 months...'"""
+    if not value or not isinstance(value, str):
+        return value
+    text = value.strip()
+    # 去除開頭的 "Opp " 前綴
+    text = re.sub(r'^Opp\s+', '', text)
+    # 替換所有出現的 DD-MON-YYYY
+    def _replace_date(m):
+        return _convert_ddmonyyyy(m.group(0))
+    text = re.sub(r'\d{1,2}-[A-Z]{3}-\d{4}', _replace_date, text)
+    return text
 
 
 def clean_class_column(value):
@@ -400,9 +422,11 @@ def read_source_data(file_bytes, mapping, db_type=''):
                     merged_row['F'] = clean_db3_app_number(merged_row['F'])
                 if 'D' in merged_row:
                     merged_row['D'] = clean_db3_region(merged_row['D'])
-                for date_col in ['H', 'I', 'J']:
+                for date_col in ['H', 'I']:
                     if date_col in merged_row:
                         merged_row[date_col] = clean_db3_date(merged_row[date_col])
+                if 'J' in merged_row:
+                    merged_row['J'] = clean_db3_opposition(merged_row['J'])
                 # 空的公告日期 → 1900-01-00、空的異議期限 → 0
                 if not merged_row.get('I') or str(merged_row['I']).strip() == '':
                     merged_row['I'] = '1900-01-00'
@@ -454,14 +478,15 @@ def create_merged_file(all_rows, all_images, progress_bar=None):
     ws = wb.active
     ws.title = '商標監控結果清單'
 
-    header_font = Font(name='Arial', bold=True, size=11)
+    # 使用 scheme='minor' 讓字型參照 theme 設定（英文 Times New Roman / 中文 新細明體）
+    header_font = Font(scheme='minor', bold=True, size=11)
     header_fill = PatternFill('solid', fgColor='D9E1F2')
     header_alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
     thin_border = Border(
         left=Side(style='thin'), right=Side(style='thin'),
         top=Side(style='thin'), bottom=Side(style='thin'),
     )
-    data_font = Font(name='Arial', size=10)
+    data_font = Font(scheme='minor', size=10)
     align_center_top = Alignment(horizontal='center', vertical='top', wrap_text=True)
     align_left_top = Alignment(horizontal='left', vertical='top', wrap_text=True)
 
@@ -558,7 +583,26 @@ def create_merged_file(all_rows, all_images, progress_bar=None):
     output = BytesIO()
     wb.save(output)
     output.seek(0)
-    return output, len(all_rows)
+
+    # Patch theme XML：將 minor font 的 latin 字型改為 Times New Roman
+    # 這樣 scheme='minor' 的 cell 會用 Times New Roman 顯示英文，新細明體顯示中文
+    from zipfile import ZipFile
+    patched = BytesIO()
+    with ZipFile(output, 'r') as zin:
+        with ZipFile(patched, 'w') as zout:
+            for item in zin.infolist():
+                data = zin.read(item.filename)
+                if item.filename == 'xl/theme/theme1.xml':
+                    text = data.decode('utf-8')
+                    text = re.sub(
+                        r'(<a:minorFont>\s*<a:latin typeface=")[^"]*(")',
+                        r'\1Times New Roman\2',
+                        text,
+                    )
+                    data = text.encode('utf-8')
+                zout.writestr(item, data)
+    patched.seek(0)
+    return patched, len(all_rows)
 
 
 # ============================================================
