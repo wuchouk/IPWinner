@@ -11,7 +11,7 @@ import streamlit.components.v1 as st_components
 import os, tempfile, json
 
 APP_VERSION = "v9.1"
-APP_LAST_UPDATE = "2026-03-04 20:15"
+APP_LAST_UPDATE = "2026-03-04 12:11"
 
 # ============================================================
 # 頁面設定
