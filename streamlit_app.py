@@ -10,7 +10,7 @@ from datetime import datetime, timezone, timedelta
 import streamlit.components.v1 as st_components
 import os, tempfile
 
-APP_VERSION = "v8"
+APP_VERSION = "v9"
 
 # ============================================================
 # 頁面設定
@@ -490,6 +490,34 @@ def create_merged_file(all_rows, all_images, progress_bar=None):
     align_center_top = Alignment(horizontal='center', vertical='top', wrap_text=True)
     align_left_top = Alignment(horizontal='left', vertical='top', wrap_text=True)
 
+    # ── Row 1：LOGO 置中（A1:L1 合併） ──
+    ws.merge_cells('A1:L1')
+    ws.row_dimensions[1].height = 58
+    ws['A1'].alignment = Alignment(horizontal='center', vertical='center')
+    # 插入 LOGO 圖片
+    logo_path = os.path.join(os.path.dirname(__file__), 'logo.jpg')
+    if os.path.exists(logo_path):
+        logo_img = Image(logo_path)
+        # 保持原圖比例，高度配合 row 1
+        logo_img.height = 55
+        logo_img.width = int(logo_img.height * (863 / 133))  # 保持範本比例
+        logo_img.anchor = 'A1'
+        ws.add_image(logo_img)
+
+    # ── Row 2：監控商標 / 監控地區 / 監控類別（留空讓使用者手動填寫） ──
+    ws.merge_cells('A2:C2')
+    ws.merge_cells('D2:G2')
+    ws.merge_cells('H2:L2')
+    ws.row_dimensions[2].height = 38
+    info_font = Font(scheme='minor', bold=True, size=14)
+    info_align = Alignment(horizontal='left', vertical='center', wrap_text=True)
+    for col_letter, label in [('A', '監控商標：'), ('D', '監控地區：'), ('H', '監控類別：')]:
+        ci = col_letter_to_index(col_letter) + 1
+        cell = ws.cell(row=2, column=ci, value=label)
+        cell.font = info_font
+        cell.alignment = info_align
+
+    # ── Row 3：欄位標題 ──
     for col_idx, header in enumerate(MERGED_HEADERS, start=1):
         cell = ws.cell(row=MERGED_HEADER_ROW, column=col_idx, value=header)
         cell.font = header_font
@@ -805,7 +833,7 @@ if uploaded_files:
                 st.session_state.merge_img_count = len(all_images)
                 st.session_state.merge_logs = logs
                 client_now = _get_client_now()
-                st.session_state.merge_filename = f"合併檔_{client_now.strftime('%Y%m%d_%H%M')}.xlsx"
+                st.session_state.merge_filename = f"{client_now.strftime('%Y%m%d_%H%M')}_合併檔.xlsx"
                 st.session_state.merge_active_dbs = [
                     (db_key, DB_LABELS[db_key], row_counts.get(db_key, 0), img_counts.get(db_key, 0), len(classified[db_key]))
                     for db_key in DB_LABELS if len(classified[db_key]) > 0
