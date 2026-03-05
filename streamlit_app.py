@@ -1083,6 +1083,7 @@ if uploaded_files:
 
                 step = 0
                 total_steps = total_files * 2  # 每個檔案讀資料 + 讀圖片
+                logs.append(f"合併檔標題 / {header_file.name}")
 
                 # 按 合併檔 → db1 → db2 → db3 順序處理
                 for db_key in ['merged', 'db1', 'db2', 'db3']:
@@ -1103,7 +1104,6 @@ if uploaded_files:
                             text=f'讀取 {label}：{fname}...',
                         )
                         rows = read_source_data(file_bytes, config['mapping'], db_type=db_key)
-                        logs.append(f"{label} / {fname}：{len(rows)} 筆資料")
 
                         # 讀取圖片
                         step += 1
@@ -1112,7 +1112,7 @@ if uploaded_files:
                             text=f'讀取 {label} 圖片：{fname}...',
                         )
                         images = read_source_images(file_bytes, config['img_col'], db_type=db_key)
-                        logs.append(f"{label} / {fname}：{len(images)} 張圖片")
+                        logs.append(f"{label} / {fname}：{len(rows)} 筆資料 / {len(images)} 張圖片")
 
                         # 計算圖片位移
                         if db_key == 'merged':
