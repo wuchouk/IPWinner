@@ -155,17 +155,18 @@ def _save_merge_history(records):
 # ============================================================
 # 合併檔標題檔案解析
 # ============================================================
-_HEADER_FILENAME_RE = re.compile(r'^(\d{8})-IP-([^-]+)-')
+_HEADER_FILENAME_RE = re.compile(r'^[A-Za-z0-9]{8}-IP-([^-]+)-')
 
 
 def parse_header_filename(filename):
     """從標題檔檔名提取慧盈案號。
-    例如 '20260114-IP-KOIS23004WWW1-合併檔標題.xlsx' → 'KOIS23004WWW1'
+    例如 'yyyymmdd-IP-KOIS23004WWW1-合併檔標題.xlsx' → 'KOIS23004WWW1'
+    亦接受 '20260114-IP-KOIS23004WWW1-合併檔標題.xlsx'。
     回傳 (案號, 錯誤訊息)，其中一個為 None。"""
     m = _HEADER_FILENAME_RE.match(filename)
     if not m:
         return None, f"標題檔檔名格式不正確，應為 yyyymmdd-IP-案號-合併檔標題.xlsx"
-    return m.group(2), None
+    return m.group(1), None
 
 
 def read_header_file(file_bytes):
