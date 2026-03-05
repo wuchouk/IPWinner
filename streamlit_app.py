@@ -885,7 +885,7 @@ def create_merged_file(all_rows, all_images, header_data=None, progress_bar=None
 
     # ── 列印設定（需求 7~10） ──
     # 需求 7：頁尾 — 頁碼/總頁數（置中）
-    ws.oddFooter.center.text = "&P/&N"
+    ws.oddFooter.center.text = "&P / &N"
     # 需求 8：列印標題列（每頁重複 Row 1~3）
     ws.print_title_rows = '1:3'
     # 需求 9：頁面邊界 — 上下左右 2cm (≈0.787in)，頁首頁尾 1cm (≈0.394in)，水平置中
