@@ -10,7 +10,7 @@ from datetime import datetime, timezone, timedelta
 import streamlit.components.v1 as st_components
 import os, tempfile, json, subprocess
 
-APP_VERSION = "v9.1"
+APP_VERSION = "v10"
 
 
 def _get_git_commit_utc():
@@ -150,6 +150,104 @@ def _save_merge_history(records):
             json.dump(data, f, ensure_ascii=False, indent=2)
     except OSError:
         pass  # Streamlit Cloud 等環境可能寫入失敗，靜默處理
+
+
+# ============================================================
+# 合併檔標題檔案解析
+# ============================================================
+_HEADER_FILENAME_RE = re.compile(r'^(\d{8})-IP-([^-]+)-')
+
+
+def parse_header_filename(filename):
+    """從標題檔檔名提取慧盈案號。
+    例如 '20260114-IP-KOIS23004WWW1-合併檔標題.xlsx' → 'KOIS23004WWW1'
+    回傳 (案號, 錯誤訊息)，其中一個為 None。"""
+    m = _HEADER_FILENAME_RE.match(filename)
+    if not m:
+        return None, f"標題檔檔名格式不正確，應為 yyyymmdd-IP-案號-合併檔標題.xlsx"
+    return m.group(2), None
+
+
+def read_header_file(file_bytes):
+    """讀取合併檔標題檔案，提取 Row 1 LOGO、Row 2 文字資訊，以及監控商標圖片。
+    圖片分類邏輯：col >= 4 為 LOGO（右側）、col < 4 為商標圖片（左側）。
+    回傳 dict，含 logo_*、trademark_*、row2_* 等欄位。"""
+    wb = openpyxl.load_workbook(BytesIO(file_bytes))
+    ws = wb.active
+    result = {
+        'logo_image_data': None,
+        'logo_width': None,
+        'logo_height': None,
+        'trademark_images': [],   # 監控商標圖片（可能有 0~多張）
+        'row2_values': {},
+        'row2_merges': [],
+        'row1_height': ws.row_dimensions[1].height or 58,
+        'row2_height': ws.row_dimensions[2].height or 38,
+    }
+
+    # 讀取 Row 1~2 範圍內的所有圖片，按位置分類
+    for img in ws._images:
+        anchor = img.anchor
+        if not hasattr(anchor, '_from'):
+            continue
+        # 只處理 Row 0~1 的圖片（對應 Excel Row 1~2）
+        if anchor._from.row > 1:
+            continue
+
+        img_data = BytesIO(img._data())
+        from_info = {
+            'col': anchor._from.col,
+            'colOff': anchor._from.colOff,
+            'row': anchor._from.row,
+            'rowOff': anchor._from.rowOff,
+        }
+
+        if anchor._from.col >= 4:
+            # 右側 → LOGO
+            result['logo_image_data'] = img_data
+            result['logo_width'] = img.width
+            result['logo_height'] = img.height
+        else:
+            # 左側 → 監控商標圖片
+            to_info = None
+            if hasattr(anchor, 'to') and anchor.to:
+                to_info = {
+                    'col': anchor.to.col,
+                    'colOff': anchor.to.colOff,
+                    'row': anchor.to.row,
+                    'rowOff': anchor.to.rowOff,
+                }
+            result['trademark_images'].append({
+                'data': img_data,
+                'width': img.width,
+                'height': img.height,
+                'from': from_info,
+                'to': to_info,
+            })
+
+    # 讀取 Row 2 合併儲存格範圍
+    from openpyxl.utils import get_column_letter
+    for mc in ws.merged_cells.ranges:
+        if mc.min_row == 2 and mc.max_row == 2:
+            result['row2_merges'].append(str(mc))
+
+    # 讀取 Row 2 的 cell 資料（只讀有值的 cell）
+    for c in range(1, 13):
+        cell = ws.cell(row=2, column=c)
+        if cell.value is not None:
+            cl = get_column_letter(c)
+            result['row2_values'][cl] = {
+                'value': cell.value,
+                'font_name': cell.font.name,
+                'font_size': cell.font.size,
+                'font_bold': cell.font.bold,
+                'align_h': cell.alignment.horizontal,
+                'align_v': cell.alignment.vertical,
+                'align_wrap': cell.alignment.wrap_text,
+            }
+
+    wb.close()
+    return result
 
 
 # ============================================================
@@ -524,8 +622,8 @@ def read_source_images(file_bytes, src_image_col, db_type=''):
     return images
 
 
-def create_merged_file(all_rows, all_images, progress_bar=None):
-    """建立合併後的 Excel 檔"""
+def create_merged_file(all_rows, all_images, header_data=None, progress_bar=None):
+    """建立合併後的 Excel 檔。header_data 來自 read_header_file()。"""
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = '商標監控結果清單'
@@ -542,24 +640,30 @@ def create_merged_file(all_rows, all_images, progress_bar=None):
     align_center_top = Alignment(horizontal='center', vertical='top', wrap_text=True)
     align_left_top = Alignment(horizontal='left', vertical='top', wrap_text=True)
 
-    # ── Row 1：LOGO 水平＋垂直置中（A1:L1 合併） ──
+    # ── Row 1：LOGO（從標題檔載入，水平＋垂直置中） ──
     ws.merge_cells('A1:L1')
-    ws.row_dimensions[1].height = 58
+    row1_h = (header_data or {}).get('row1_height', 58)
+    ws.row_dimensions[1].height = row1_h
     ws['A1'].alignment = Alignment(horizontal='center', vertical='center')
-    # 插入 LOGO 圖片（精確置中於合併儲存格）
-    logo_path = os.path.join(os.path.dirname(__file__), 'logo.jpg')
-    if os.path.exists(logo_path):
-        logo_img = Image(logo_path)
-        logo_img.height = 55
-        logo_img.width = int(logo_img.height * (863 / 133))  # 保持範本比例
+
+    if header_data and header_data.get('logo_image_data'):
+        header_data['logo_image_data'].seek(0)
+        logo_img = Image(header_data['logo_image_data'])
+        logo_img.width = header_data.get('logo_width', 863)
+        logo_img.height = header_data.get('logo_height', 133)
+        # 縮放到合理高度（行高 - 3pt 留白）
+        target_h = max(int(row1_h - 3), 40)
+        if logo_img.height > target_h:
+            ratio = target_h / logo_img.height
+            logo_img.height = target_h
+            logo_img.width = int(logo_img.width * ratio)
 
         # 計算各欄寬度（像素）以求出水平置中偏移
         _cw_chars = [4, 23, 23, 15, 15, 16, 25, 15, 20, 20, 60, 60]  # A~L
         _cw_px = [int(w * 7 + 5) for w in _cw_chars]
         _total_px = sum(_cw_px)
-        _left_px = (_total_px - logo_img.width) / 2  # 左留白（像素）
+        _left_px = (_total_px - logo_img.width) / 2
 
-        # 找出 LOGO 起始落在第幾欄、欄內偏移多少
         _cum = 0
         _logo_col, _logo_col_off_px = 0, 0
         for _i, _cpx in enumerate(_cw_px):
@@ -569,12 +673,10 @@ def create_merged_file(all_rows, all_images, progress_bar=None):
                 break
             _cum += _cpx
 
-        # 垂直置中：row height 58pt → EMU；圖片高度 → EMU
-        _row_h_emu = int(58 * 12700)
+        _row_h_emu = int(row1_h * 12700)
         _img_h_emu = pixels_to_EMU(logo_img.height)
         _row_off_emu = max(0, (_row_h_emu - _img_h_emu) // 2)
 
-        # 計算 LOGO 結束位置
         _right_px = _left_px + logo_img.width
         _cum2 = 0
         _logo_to_col, _logo_to_col_off_px = len(_cw_px) - 1, _cw_px[-1]
@@ -600,18 +702,92 @@ def create_merged_file(all_rows, all_images, progress_bar=None):
         logo_img.anchor = TwoCellAnchor(_from=_from_marker, to=_to_marker)
         ws.add_image(logo_img)
 
-    # ── Row 2：監控商標 / 監控地區 / 監控類別（留空讓使用者手動填寫） ──
-    ws.merge_cells('A2:C2')
-    ws.merge_cells('D2:G2')
-    ws.merge_cells('H2:L2')
-    ws.row_dimensions[2].height = 38
-    info_font = Font(scheme='minor', bold=True, size=14)
-    info_align = Alignment(horizontal='left', vertical='center', wrap_text=True)
-    for col_letter, label in [('A', '監控商標：'), ('D', '監控地區：'), ('H', '監控類別：')]:
-        ci = col_letter_to_index(col_letter) + 1
-        cell = ws.cell(row=2, column=ci, value=label)
-        cell.font = info_font
-        cell.alignment = info_align
+    # ── Row 2：監控商標 / 監控地區 / 監控類別（從標題檔載入） ──
+    if header_data and header_data.get('row2_merges'):
+        for mr in header_data['row2_merges']:
+            ws.merge_cells(mr)
+    else:
+        ws.merge_cells('A2:C2')
+        ws.merge_cells('D2:G2')
+        ws.merge_cells('H2:L2')
+    row2_h = (header_data or {}).get('row2_height', 38)
+    ws.row_dimensions[2].height = row2_h
+
+    if header_data and header_data.get('row2_values'):
+        for cl, info in header_data['row2_values'].items():
+            ci = col_letter_to_index(cl) + 1
+            cell = ws.cell(row=2, column=ci, value=info['value'])
+            cell.font = Font(
+                name=info.get('font_name', '新細明體'),
+                size=info.get('font_size', 14),
+                bold=info.get('font_bold', True),
+            )
+            cell.alignment = Alignment(
+                horizontal=info.get('align_h', 'left'),
+                vertical=info.get('align_v', 'center'),
+                wrap_text=info.get('align_wrap', True),
+            )
+    else:
+        # 備用：沒有標題檔時使用預設空白標題
+        info_font = Font(scheme='minor', bold=True, size=14)
+        info_align = Alignment(horizontal='left', vertical='center', wrap_text=True)
+        for col_letter, label in [('A', '監控商標：'), ('D', '監控地區：'), ('H', '監控類別：')]:
+            ci = col_letter_to_index(col_letter) + 1
+            cell = ws.cell(row=2, column=ci, value=label)
+            cell.font = info_font
+            cell.alignment = info_align
+
+    # ── 監控商標圖片（底部對齊 Row 2 底線上方 5pt，向上延伸到 Row 1） ──
+    if header_data and header_data.get('trademark_images'):
+        _PT = 12700  # 1pt = 12700 EMU
+        _row1_h_emu = int(row1_h * _PT)
+        _row2_h_emu = int(row2_h * _PT)
+        _margin_emu = int(5 * _PT)  # 底線往上 5pt
+        for tm_img_info in header_data['trademark_images']:
+            tm_img_info['data'].seek(0)
+            tm_img = Image(tm_img_info['data'])
+            tm_img.width = tm_img_info['width']
+            tm_img.height = tm_img_info['height']
+            f = tm_img_info['from']
+            # 計算原始圖片顯示高度（EMU）
+            if tm_img_info.get('to'):
+                t = tm_img_info['to']
+                # absolute_y = 各 row 高度加總 + rowOff
+                _orig_from_y = f['rowOff']
+                for _r in range(f['row']):
+                    _orig_from_y += _row1_h_emu if _r == 0 else _row2_h_emu
+                _orig_to_y = t['rowOff']
+                for _r in range(t['row']):
+                    _orig_to_y += _row1_h_emu if _r == 0 else _row2_h_emu
+                _img_h_emu = max(_orig_to_y - _orig_from_y, int(20 * _PT))
+            else:
+                _img_h_emu = pixels_to_EMU(tm_img.height)
+            # to = Row 2 底線往上 5pt
+            _to_abs_y = _row1_h_emu + _row2_h_emu - _margin_emu
+            # from = to 往上 圖片高度
+            _from_abs_y = max(0, _to_abs_y - _img_h_emu)
+            # 轉換回 row / rowOff
+            if _from_abs_y < _row1_h_emu:
+                _from_row, _from_off = 0, _from_abs_y
+            else:
+                _from_row, _from_off = 1, _from_abs_y - _row1_h_emu
+            if _to_abs_y < _row1_h_emu:
+                _to_row, _to_off = 0, _to_abs_y
+            else:
+                _to_row, _to_off = 1, _to_abs_y - _row1_h_emu
+            _tm_from = AnchorMarker(
+                col=f['col'], colOff=f['colOff'],
+                row=_from_row, rowOff=int(_from_off),
+            )
+            _to_col = t['col'] if tm_img_info.get('to') else f['col']
+            _to_colOff = t['colOff'] if tm_img_info.get('to') else (
+                f['colOff'] + pixels_to_EMU(tm_img.width))
+            _tm_to = AnchorMarker(
+                col=_to_col, colOff=_to_colOff,
+                row=_to_row, rowOff=int(_to_off),
+            )
+            tm_img.anchor = TwoCellAnchor(_from=_tm_from, to=_tm_to)
+            ws.add_image(tm_img)
 
     # ── Row 3：欄位標題 ──
     for col_idx, header in enumerate(MERGED_HEADERS, start=1):
@@ -628,6 +804,7 @@ def create_merged_file(all_rows, all_images, progress_bar=None):
         num_cell = ws.cell(row=row_num, column=1, value=f'=ROW()-{MERGED_HEADER_ROW}')
         num_cell.font = data_font
         num_cell.alignment = align_center_top
+        num_cell.border = thin_border
         for cl in col_letters:
             ci = col_letter_to_index(cl) + 1
             v = row_data.get(cl)
@@ -640,6 +817,7 @@ def create_merged_file(all_rows, all_images, progress_bar=None):
             cell = ws.cell(row=row_num, column=ci, value=v if v is not None else '')
             cell.font = data_font
             cell.alignment = align_left_top
+            cell.border = thin_border
         if progress_bar and i % 50 == 0:
             progress_bar.progress(
                 0.3 + 0.3 * (i / max(total, 1)),
@@ -704,6 +882,23 @@ def create_merged_file(all_rows, all_images, progress_bar=None):
     last_row = MERGED_HEADER_ROW + len(all_rows)
     ws.auto_filter.ref = f'A{MERGED_HEADER_ROW}:L{last_row}'
 
+    # ── 列印設定（需求 7~10） ──
+    # 需求 7：頁尾 — 頁碼/總頁數（置中）
+    ws.oddFooter.center.text = "&P/&N"
+    # 需求 8：列印標題列（每頁重複 Row 1~3）
+    ws.print_title_rows = '1:3'
+    # 需求 9：頁面邊界 — 上下左右 2cm (≈0.787in)，頁首頁尾 1cm (≈0.394in)，水平置中
+    ws.page_margins.top = 0.787
+    ws.page_margins.bottom = 0.787
+    ws.page_margins.left = 0.787
+    ws.page_margins.right = 0.787
+    ws.page_margins.header = 0.394
+    ws.page_margins.footer = 0.394
+    ws.print_options.horizontalCentered = True
+    # 需求 10：列印方向橫向 + 縮放 46%
+    ws.page_setup.orientation = 'landscape'
+    ws.page_setup.scale = 46
+
     output = BytesIO()
     wb.save(output)
     output.seek(0)
@@ -748,7 +943,35 @@ st.divider()
 if 'uploader_key' not in st.session_state:
     st.session_state.uploader_key = 0
 
-# 單一上傳窗口
+# ── 上傳區 1：合併檔標題（必填） ──
+st.subheader("① 合併檔標題")
+header_file = st.file_uploader(
+    "上傳合併檔標題檔案（必填）",
+    type=["xlsx"],
+    accept_multiple_files=False,
+    help="檔名格式：yyyymmdd-IP-慧盈案號-合併檔標題.xlsx",
+    key=f"header_uploader_{st.session_state.uploader_key}",
+)
+
+# 驗證標題檔
+_header_ok = False
+_header_data = None
+_case_number = None
+if header_file:
+    _case_number, _header_err = parse_header_filename(header_file.name)
+    if _header_err:
+        st.error(f"⚠️ {_header_err}\n\n上傳的檔名：`{header_file.name}`")
+    else:
+        _header_data = read_header_file(header_file.getvalue())
+        _header_ok = True
+        st.success(f"✅ 慧盈案號：**{_case_number}**")
+else:
+    st.info("請先上傳合併檔標題檔案，才能進行合併。")
+
+st.divider()
+
+# ── 上傳區 2：資料檔案 ──
+st.subheader("② 資料檔案")
 uploaded_files = st.file_uploader(
     "將檔案拖放至此處，或點擊 Browse files 選擇檔案",
     type=["xlsx"],
@@ -836,9 +1059,10 @@ if uploaded_files:
     if 'merge_done' not in st.session_state:
         st.session_state.merge_done = False
 
-    # 合併按鈕（僅在尚未合併時顯示）
+    # 合併按鈕（僅在尚未合併時顯示，且必須有標題檔）
     if not st.session_state.merge_done:
-        if st.button("🚀 開始合併", type="primary", use_container_width=True):
+        _can_merge = _header_ok and total_files > 0
+        if st.button("🚀 開始合併", type="primary", use_container_width=True, disabled=not _can_merge):
             progress_bar = st.progress(0, text="開始處理...")
             logs = []
 
@@ -909,7 +1133,7 @@ if uploaded_files:
 
                 # 建立合併檔
                 progress_bar.progress(0.30, text=f'建立合併檔（{len(all_rows)} 筆，{len(all_images)} 張圖片）...')
-                output_bytes, count = create_merged_file(all_rows, all_images, progress_bar)
+                output_bytes, count = create_merged_file(all_rows, all_images, header_data=_header_data, progress_bar=progress_bar)
                 progress_bar.progress(1.0, text="合併完成！")
 
                 # 執行記錄彙總
@@ -929,7 +1153,11 @@ if uploaded_files:
                 st.session_state.merge_img_count = len(all_images)
                 st.session_state.merge_logs = logs
                 client_now = _get_client_now()
-                st.session_state.merge_filename = f"{client_now.strftime('%Y%m%d_%H%M')}_合併檔.xlsx"
+                # 需求 5：yyyymmdd-TC-案號-商標監控結果清單(完整).xlsx
+                if _case_number:
+                    st.session_state.merge_filename = f"{client_now.strftime('%Y%m%d')}-TC-{_case_number}-商標監控結果清單(完整).xlsx"
+                else:
+                    st.session_state.merge_filename = f"{client_now.strftime('%Y%m%d_%H%M')}_合併檔.xlsx"
                 st.session_state.merge_active_dbs = [
                     (db_key, DB_LABELS[db_key], row_counts.get(db_key, 0), img_counts.get(db_key, 0), len(classified[db_key]))
                     for db_key in DB_LABELS if len(classified[db_key]) > 0
@@ -1012,7 +1240,7 @@ if _persisted_history:
 
 # 頁尾
 st.divider()
-st.caption("商標監控資料合併工具 · 輸出為簡易版格式（無標題列），可事後手動加上事務所標題。")
+st.caption("商標監控資料合併工具 · 請上傳合併檔標題及資料檔案後進行合併。")
 if _GIT_COMMIT_UTC:
     # 將 git commit UTC 時間轉為使用者本地時區
     if isinstance(_client_tz_offset, (int, float)):
