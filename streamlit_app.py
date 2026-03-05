@@ -896,9 +896,12 @@ def create_merged_file(all_rows, all_images, header_data=None, progress_bar=None
     ws.page_margins.header = 0.394
     ws.page_margins.footer = 0.394
     ws.print_options.horizontalCentered = True
-    # 需求 10：列印方向橫向 + 縮放 46%
+    # 需求 10：列印方向橫向，自動縮放至 1 頁寬（取代固定 46%）
     ws.page_setup.orientation = 'landscape'
-    ws.page_setup.scale = 46
+    ws.page_setup.paperSize = 9  # A4
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0  # 高度不限頁數
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
 
     output = BytesIO()
     wb.save(output)
