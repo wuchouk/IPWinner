@@ -311,6 +311,30 @@ def _save_api_credentials(account, password):
         json.dump(data, f)
 
 
+def _load_secrets_fallback():
+    """從 st.secrets 讀取預設 API 帳密（Streamlit Cloud 後台設定，不會因重新部署消失）"""
+    try:
+        return {
+            'account': st.secrets["tipo_api"]["account"],
+            'password': st.secrets["tipo_api"]["password"],
+        }
+    except Exception:
+        return None
+
+
+def _get_api_credentials():
+    """取得 API 帳密（優先使用者儲存 → fallback st.secrets）。
+    回傳 (account, password, source) 或 (None, None, None)。
+    source: 'user' | 'default' | None"""
+    saved = _load_api_credentials()
+    if saved:
+        return saved['account'], saved['password'], 'user'
+    fallback = _load_secrets_fallback()
+    if fallback:
+        return fallback['account'], fallback['password'], 'default'
+    return None, None, None
+
+
 # ============================================================
 # 頁面設定
 # ============================================================
@@ -1543,12 +1567,15 @@ elif _page == "📥 下載公開說明書":
     st.title("📥 下載公開說明書")
     st.markdown("輸入專利號碼（每行一個，或上傳檔案），點擊查詢後系統會自動查詢並下載公開說明書。")
 
-    # 讀取已儲存的 API 帳密
-    _saved_creds = _load_api_credentials()
-    _api_account = _saved_creds['account'] if _saved_creds else ""
-    _api_password = _saved_creds['password'] if _saved_creds else ""
-    if not _saved_creds:
+    # 讀取 API 帳密（優先使用者自己的 → fallback 預設）
+    _api_account, _api_password, _cred_source = _get_api_credentials()
+    if _cred_source == 'user':
+        pass  # 使用者已設定，不顯示訊息
+    elif _cred_source == 'default':
+        st.info("ℹ️ 目前使用預設 API 帳號。如需使用自己的帳號，請至「⚙️ 設定」頁面設定。")
+    else:
         st.warning("⚠️ 尚未設定 API 帳號，請先至「⚙️ 設定」頁面儲存 API 帳密。")
+        _api_account, _api_password = "", ""
 
     st.divider()
 
@@ -1865,6 +1892,8 @@ elif _page == "⚙️ 設定":
     st.caption("由智慧財產局核發的 API 帳號密碼。每位使用者可各自儲存，帳密會加密保存。")
 
     _saved_creds = _load_api_credentials()
+    _secrets_fallback = _load_secrets_fallback()
+
     _api_account = st.text_input(
         "API 帳號",
         value=_saved_creds['account'] if _saved_creds else "",
@@ -1888,6 +1917,8 @@ elif _page == "⚙️ 設定":
 
     if _saved_creds:
         st.info("✅ 已有儲存的 API 帳號", icon="✅")
+    elif _secrets_fallback:
+        st.info("ℹ️ 尚未儲存個人 API 帳號，目前使用系統預設帳號。建議申請並填入自己的帳號。", icon="ℹ️")
     else:
         st.warning("⚠️ 尚未儲存 API 帳號，請輸入後點擊儲存。", icon="⚠️")
 
