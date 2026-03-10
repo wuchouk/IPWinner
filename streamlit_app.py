@@ -9,8 +9,14 @@ from io import BytesIO
 from datetime import datetime, timezone, timedelta
 import streamlit.components.v1 as st_components
 import os, tempfile, json, subprocess
+import urllib.request
+import urllib.error
+import base64
+import ssl
+import zipfile
+import time
 
-APP_VERSION = "v10"
+APP_VERSION = "v11"
 
 
 def _get_git_commit_utc():
@@ -32,6 +38,200 @@ def _get_git_commit_utc():
 
 
 _GIT_COMMIT_UTC = _get_git_commit_utc()
+
+# ============================================================
+# 專利公開資訊 API 模組（台灣案全自動下載）
+# ============================================================
+_TIPO_API_BASE = "https://tiponet.tipo.gov.tw/S092_API/opd1"
+_SSL_CTX = ssl.create_default_context()
+
+
+def tipo_get_token(account, password):
+    """取得 Bearer Token（專利公開資訊 API）"""
+    creds = base64.b64encode(f"{account}:{password}".encode()).decode()
+    req = urllib.request.Request(f"{_TIPO_API_BASE}/getAuth")
+    req.add_header("Authorization", f"Basic {creds}")
+    with urllib.request.urlopen(req, timeout=30, context=_SSL_CTX) as resp:
+        return resp.read().decode("utf-8").strip()
+
+
+def tipo_get_case_info(token, case_id):
+    """查詢專利案件基本資訊（可用申請案號、公開號、公告號）"""
+    req = urllib.request.Request(f"{_TIPO_API_BASE}/getCaseInfo/{case_id}")
+    req.add_header("Authorization", f"Bearer {token}")
+    with urllib.request.urlopen(req, timeout=30, context=_SSL_CTX) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def tipo_get_file_list(token, case_no):
+    """查詢收發文歷程（含說明書下載連結）"""
+    req = urllib.request.Request(f"{_TIPO_API_BASE}/getResultFileList/{case_no}")
+    req.add_header("Authorization", f"Bearer {token}")
+    with urllib.request.urlopen(req, timeout=30, context=_SSL_CTX) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def tipo_download_file(token, file_url):
+    """下載檔案（串流），回傳 bytes"""
+    req = urllib.request.Request(file_url)
+    req.add_header("Authorization", f"Bearer {token}")
+    with urllib.request.urlopen(req, timeout=120, context=_SSL_CTX) as resp:
+        return resp.read()
+
+
+def tipo_find_latest_specification(file_list_data):
+    """從收發文歷程中找到最新版的專利說明書 PDF。
+    搜尋策略：從後往前找 showName 包含「說明書」的檔案。
+    回傳 (showName, fileURL, length) 或 None。"""
+    results = file_list_data.get("resultFileList", [])
+    # 從最新的紀錄往回找
+    for record in reversed(results):
+        for f in record.get("fileList", []):
+            name = f.get("showName", "")
+            if "說明書" in name and f.get("fileURL"):
+                return {
+                    "showName": name,
+                    "fileURL": f["fileURL"],
+                    "length": f.get("length", 0),
+                    "category": record.get("caseReasonName", ""),
+                    "date": record.get("documentDate", ""),
+                }
+    return None
+
+
+# ============================================================
+# GPSS API 模組（外國案查詢 + 連結產生）
+# ============================================================
+_GPSS_API_BASE = "https://tiponet.tipo.gov.tw/gpss1/gpsskmc/gpss_api"
+_GPSS_SEARCH_URL = "https://gpss.tipo.gov.tw/gpsskmc/gpssbkm"
+
+# 資料庫代碼對照
+_COUNTRY_DB_MAP = {
+    "TW": ["TWA", "TWB"],
+    "US": ["USA", "USB"],
+    "CN": ["CNA", "CNB"],
+    "JP": ["JPA", "JPB"],
+    "EP": ["EPA", "EPB"],
+    "KR": ["KPA", "KPB"],
+    "WO": ["WO"],
+}
+
+# 反向：從 DB 代碼推回國家
+_DB_TO_COUNTRY = {}
+for _c, _dbs in _COUNTRY_DB_MAP.items():
+    for _d in _dbs:
+        _DB_TO_COUNTRY[_d] = _c
+
+
+def gpss_search(user_code, patent_number, pat_db=None):
+    """用 GPSS API 查詢專利（用 PN 或 AN）。回傳 JSON dict 或 None。"""
+    params = f"userCode={user_code}"
+    if pat_db:
+        params += f"&patDB={pat_db}"
+    # 先用 PN 查
+    params += f"&PN={patent_number}"
+    params += "&expFld=PN,ID,AN,AD,TI&expFmt=json&expQty=5"
+    url = f"{_GPSS_API_BASE}?{params}"
+    req = urllib.request.Request(url)
+    req.add_header("User-Agent", "Mozilla/5.0")
+    try:
+        with urllib.request.urlopen(req, timeout=30, context=_SSL_CTX) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            return data
+    except Exception:
+        return None
+
+
+# ============================================================
+# 專利號碼解析模組
+# ============================================================
+# 各國專利號碼格式（帶國碼前綴）
+_PATENT_PATTERNS = [
+    # TW: TW105131793, TWI642307, TW201637458A
+    (r'\b(TW)\s*([A-Z]?\d{6,}[A-Z]?\d*)\b', 'TW'),
+    # US: US20150001234A1, US9876543B2, US2015/0001234
+    (r'\b(US)\s*(\d{4,}/?[\d]+[A-Z]?\d*)\b', 'US'),
+    # CN: CN201510879928A, CN1234567B
+    (r'\b(CN)\s*(\d{6,}[A-Z]?\d*)\b', 'CN'),
+    # JP: JP2015123456A
+    (r'\b(JP)\s*(\d{4,}[A-Z]?\d*)\b', 'JP'),
+    # EP: EP1234567A1
+    (r'\b(EP)\s*(\d{4,}[A-Z]?\d*)\b', 'EP'),
+    # KR: KR20150001234A
+    (r'\b(KR)\s*(\d{4,}[A-Z]?\d*)\b', 'KR'),
+    # WO: WO2015001234A1
+    (r'\b(WO)\s*(\d{4,}[A-Z]?\d*)\b', 'WO'),
+]
+
+# 純數字號碼（不帶國碼）
+_BARE_NUMBER_PATTERN = re.compile(r'\b(\d{6,}[A-Z]?\d*)\b')
+
+
+def parse_patent_numbers(text):
+    """從文字中解析專利號碼。
+    回傳 list of dict: [{"country": "TW"|""|..., "number": "...", "raw": "原始文字"}]
+    """
+    results = []
+    seen = set()
+
+    # 先找帶國碼的
+    found_positions = set()  # 避免同一位置被重複匹配
+    for pattern, country in _PATENT_PATTERNS:
+        for m in re.finditer(pattern, text, re.IGNORECASE):
+            raw = m.group(0).strip()
+            number = m.group(2).replace("/", "").replace(" ", "")
+            key = f"{country}_{number}"
+            if key not in seen:
+                seen.add(key)
+                results.append({"country": country, "number": number, "raw": raw})
+                found_positions.update(range(m.start(), m.end()))
+
+    # 再找純數字（沒有國碼前綴的）
+    for m in _BARE_NUMBER_PATTERN.finditer(text):
+        # 跳過已經被帶國碼模式匹配到的位置
+        if any(p in found_positions for p in range(m.start(), m.end())):
+            continue
+        number = m.group(1)
+        key = f"__{number}"
+        if key not in seen:
+            seen.add(key)
+            results.append({"country": "", "number": number, "raw": number})
+
+    return results
+
+
+def parse_file_for_patent_numbers(uploaded_file):
+    """從上傳的檔案（txt/docx/xlsx）中提取專利號碼"""
+    filename = uploaded_file.name.lower()
+    text = ""
+
+    if filename.endswith('.txt'):
+        text = uploaded_file.read().decode('utf-8', errors='replace')
+    elif filename.endswith(('.doc', '.docx')):
+        try:
+            from docx import Document
+            doc = Document(BytesIO(uploaded_file.read()))
+            text = "\n".join(p.text for p in doc.paragraphs)
+            # 也讀取表格
+            for table in doc.tables:
+                for row in table.rows:
+                    for cell in row.cells:
+                        text += "\n" + cell.text
+        except ImportError:
+            # 若 python-docx 未安裝，嘗試純文字讀取
+            text = uploaded_file.read().decode('utf-8', errors='replace')
+    elif filename.endswith(('.xlsx', '.xls')):
+        wb = openpyxl.load_workbook(BytesIO(uploaded_file.read()), data_only=True)
+        for ws in wb.worksheets:
+            for row in ws.iter_rows(values_only=True):
+                for cell in row:
+                    if cell is not None:
+                        text += str(cell) + "\n"
+    else:
+        text = uploaded_file.read().decode('utf-8', errors='replace')
+
+    return parse_patent_numbers(text)
+
 
 # ============================================================
 # 頁面設定
@@ -938,315 +1138,594 @@ DB_LABELS = {
     'db3': '資料庫 3',
 }
 
-st.title("📋 商標監控資料合併工具")
-st.markdown("上傳各資料庫的原始 Excel 檔（最多 15 個），系統會自動辨識來源並合併。也可同時放入舊的合併檔，系統會一起整合。")
+st.title("📋 IP Winner 工具箱")
 
-st.divider()
+tab_merge, tab_patent = st.tabs(["📋 合併檔案", "📥 下載公開說明書"])
 
-# 用遞增 key 來重置 file_uploader
-if 'uploader_key' not in st.session_state:
-    st.session_state.uploader_key = 0
+# ============================================================
+# Tab 1: 合併檔案（原有功能）
+# ============================================================
+with tab_merge:
+    st.markdown("上傳各資料庫的原始 Excel 檔（最多 15 個），系統會自動辨識來源並合併。也可同時放入舊的合併檔，系統會一起整合。")
 
-# ── 上傳區 1：合併檔標題（必填） ──
-st.subheader("① 合併檔標題")
-header_file = st.file_uploader(
-    "上傳合併檔標題檔案（必填）",
-    type=["xlsx"],
-    accept_multiple_files=False,
-    help="檔名格式：yyyymmdd-IP-慧盈案號-合併檔標題.xlsx",
-    key=f"header_uploader_{st.session_state.uploader_key}",
-)
+    st.divider()
 
-# 驗證標題檔
-_header_ok = False
-_header_data = None
-_case_number = None
-if header_file:
-    _case_number, _header_err = parse_header_filename(header_file.name)
-    if _header_err:
-        st.error(f"⚠️ {_header_err}\n\n上傳的檔名：`{header_file.name}`")
-    else:
-        _header_data = read_header_file(header_file.getvalue())
-        _header_ok = True
-        st.success(f"✅ 慧盈案號：**{_case_number}**")
-else:
-    st.info("請先上傳合併檔標題檔案，才能進行合併。")
+    # 用遞增 key 來重置 file_uploader
+    if 'uploader_key' not in st.session_state:
+        st.session_state.uploader_key = 0
 
-st.divider()
+    # ── 上傳區 1：合併檔標題（必填） ──
+    st.subheader("① 合併檔標題")
+    header_file = st.file_uploader(
+        "上傳合併檔標題檔案（必填）",
+        type=["xlsx"],
+        accept_multiple_files=False,
+        help="檔名格式：yyyymmdd-IP-慧盈案號-合併檔標題.xlsx",
+        key=f"header_uploader_{st.session_state.uploader_key}",
+    )
 
-# ── 上傳區 2：資料檔案 ──
-st.subheader("② 資料檔案")
-uploaded_files = st.file_uploader(
-    "將檔案拖放至此處，或點擊 Browse files 選擇檔案",
-    type=["xlsx"],
-    accept_multiple_files=True,
-    help="支援同時上傳多個 .xlsx 檔案，系統會自動辨識來自哪個資料庫",
-    key=f"file_uploader_{st.session_state.uploader_key}",
-)
-
-# 注入 JS 強制顯示所有已上傳檔案（移除 Streamlit 內建的分頁隱藏）
-# st_components.html 的 iframe 有 allow-same-origin，可以存取 parent document
-if uploaded_files and len(uploaded_files) > 3:
-    st_components.html("""<script>
-    (function(){
-        try {
-            var doc = window.parent.document;
-            function showAll() {
-                var items = doc.querySelectorAll(
-                    '[data-testid="stFileUploaderFile"]'
-                );
-                items.forEach(function(el){ el.style.display = 'flex'; });
-                var pag = doc.querySelectorAll(
-                    '[data-testid="stFileUploader"] nav[role="navigation"], ' +
-                    '[data-testid="stFileUploader"] [data-testid="stPagination"]'
-                );
-                pag.forEach(function(el){ el.style.display = 'none'; });
-            }
-            showAll();
-            setTimeout(showAll, 500);
-            setTimeout(showAll, 1500);
-        } catch(e) { /* sandbox 擋住就算了，CSS 會處理分頁隱藏 */ }
-    })();
-    </script>""", height=0)
-
-# 檢查上傳數量
-if uploaded_files and len(uploaded_files) > 15:
-    st.error("⚠️ 最多只能上傳 15 個檔案，請減少檔案數量。")
-    st.stop()
-
-# 辨識並分類檔案
-if uploaded_files:
-    classified = {'merged': [], 'db1': [], 'db2': [], 'db3': []}
-    unknown_files = []
-
-    for f in uploaded_files:
-        file_bytes = f.getvalue()
-        db_type = detect_db_type(file_bytes)
-        if db_type:
-            classified[db_type].append((f.name, file_bytes))
+    # 驗證標題檔
+    _header_ok = False
+    _header_data = None
+    _case_number = None
+    if header_file:
+        _case_number, _header_err = parse_header_filename(header_file.name)
+        if _header_err:
+            st.error(f"⚠️ {_header_err}\n\n上傳的檔名：`{header_file.name}`")
         else:
-            unknown_files.append(f.name)
+            _header_data = read_header_file(header_file.getvalue())
+            _header_ok = True
+            st.success(f"✅ 慧盈案號：**{_case_number}**")
+    else:
+        st.info("請先上傳合併檔標題檔案，才能進行合併。")
 
-    # 顯示辨識結果
-    st.subheader("📂 檔案辨識結果")
+    st.divider()
 
-    cols = st.columns(4)
-    for i, (db_key, label) in enumerate(DB_LABELS.items()):
-        with cols[i]:
-            files_list = classified[db_key]
-            count = len(files_list)
-            if count > 0:
-                st.success(f"**{label}**　{count} 個檔案")
-                for fname, _ in files_list:
-                    st.caption(f"　📄 {fname}")
-            else:
-                if db_key == 'merged':
-                    st.info(f"**{label}**　無")
-                else:
-                    st.warning(f"**{label}**　未偵測到")
+    # ── 上傳區 2：資料檔案 ──
+    st.subheader("② 資料檔案")
+    uploaded_files = st.file_uploader(
+        "將檔案拖放至此處，或點擊 Browse files 選擇檔案",
+        type=["xlsx"],
+        accept_multiple_files=True,
+        help="支援同時上傳多個 .xlsx 檔案，系統會自動辨識來自哪個資料庫",
+        key=f"file_uploader_{st.session_state.uploader_key}",
+    )
 
-    if unknown_files:
-        st.error(
-            f"⚠️ 以下 {len(unknown_files)} 個檔案無法辨識來源，將被忽略：\n\n"
-            + "\n".join(f"- {name}" for name in unknown_files)
-        )
+    # 注入 JS 強制顯示所有已上傳檔案（移除 Streamlit 內建的分頁隱藏）
+    # st_components.html 的 iframe 有 allow-same-origin，可以存取 parent document
+    if uploaded_files and len(uploaded_files) > 3:
+        st_components.html("""<script>
+        (function(){
+            try {
+                var doc = window.parent.document;
+                function showAll() {
+                    var items = doc.querySelectorAll(
+                        '[data-testid="stFileUploaderFile"]'
+                    );
+                    items.forEach(function(el){ el.style.display = 'flex'; });
+                    var pag = doc.querySelectorAll(
+                        '[data-testid="stFileUploader"] nav[role="navigation"], ' +
+                        '[data-testid="stFileUploader"] [data-testid="stPagination"]'
+                    );
+                    pag.forEach(function(el){ el.style.display = 'none'; });
+                }
+                showAll();
+                setTimeout(showAll, 500);
+                setTimeout(showAll, 1500);
+            } catch(e) { /* sandbox 擋住就算了，CSS 會處理分頁隱藏 */ }
+        })();
+        </script>""", height=0)
 
-    # 確認至少有檔案可以合併
-    total_files = sum(len(v) for v in classified.values())
-    if total_files == 0:
-        st.error("沒有可辨識的檔案，請確認上傳的是正確的原始檔。")
+    # 檢查上傳數量
+    if uploaded_files and len(uploaded_files) > 15:
+        st.error("⚠️ 最多只能上傳 15 個檔案，請減少檔案數量。")
         st.stop()
 
+    # 辨識並分類檔案
+    if uploaded_files:
+        classified = {'merged': [], 'db1': [], 'db2': [], 'db3': []}
+        unknown_files = []
+
+        for f in uploaded_files:
+            file_bytes = f.getvalue()
+            db_type = detect_db_type(file_bytes)
+            if db_type:
+                classified[db_type].append((f.name, file_bytes))
+            else:
+                unknown_files.append(f.name)
+
+        # 顯示辨識結果
+        st.subheader("📂 檔案辨識結果")
+
+        cols = st.columns(4)
+        for i, (db_key, label) in enumerate(DB_LABELS.items()):
+            with cols[i]:
+                files_list = classified[db_key]
+                count = len(files_list)
+                if count > 0:
+                    st.success(f"**{label}**　{count} 個檔案")
+                    for fname, _ in files_list:
+                        st.caption(f"　📄 {fname}")
+                else:
+                    if db_key == 'merged':
+                        st.info(f"**{label}**　無")
+                    else:
+                        st.warning(f"**{label}**　未偵測到")
+
+        if unknown_files:
+            st.error(
+                f"⚠️ 以下 {len(unknown_files)} 個檔案無法辨識來源，將被忽略：\n\n"
+                + "\n".join(f"- {name}" for name in unknown_files)
+            )
+
+        # 確認至少有檔案可以合併
+        total_files = sum(len(v) for v in classified.values())
+        if total_files == 0:
+            st.error("沒有可辨識的檔案，請確認上傳的是正確的原始檔。")
+            st.stop()
+
+        st.divider()
+
+        # 初始化 session_state
+        if 'merge_done' not in st.session_state:
+            st.session_state.merge_done = False
+
+        # 合併按鈕（僅在尚未合併時顯示，且必須有標題檔）
+        if not st.session_state.merge_done:
+            _can_merge = _header_ok and total_files > 0
+            if st.button("🚀 開始合併", type="primary", use_container_width=True, disabled=not _can_merge):
+                progress_bar = st.progress(0, text="開始處理...")
+                logs = []
+
+                try:
+                    all_rows = []
+                    all_images = []
+                    row_counts = {}
+                    img_counts = {}
+
+                    # 定義處理順序和對應的設定
+                    db_configs = {
+                        'merged': {'mapping': MERGED_FILE_MAPPING, 'img_col': MERGED_FILE_IMAGE_SRC_COL},
+                        'db1': {'mapping': DB1_MAPPING, 'img_col': DB1_IMAGE_SRC_COL},
+                        'db2': {'mapping': DB2_MAPPING_NO_REGION, 'img_col': DB2_IMAGE_SRC_COL},
+                        'db3': {'mapping': DB3_MAPPING, 'img_col': DB3_IMAGE_SRC_COL},
+                    }
+
+                    step = 0
+                    total_steps = total_files * 2  # 每個檔案讀資料 + 讀圖片
+                    logs.append(f"合併檔標題 / {header_file.name}")
+
+                    # 按 合併檔 → db1 → db2 → db3 順序處理
+                    for db_key in ['merged', 'db1', 'db2', 'db3']:
+                        files_list = classified[db_key]
+                        if not files_list:
+                            continue
+
+                        config = db_configs[db_key]
+                        label = DB_LABELS[db_key]
+                        db_row_count = 0
+                        db_img_count = 0
+
+                        for fname, file_bytes in files_list:
+                            # 讀取資料
+                            step += 1
+                            progress_bar.progress(
+                                0.05 + 0.20 * (step / total_steps),
+                                text=f'讀取 {label}：{fname}...',
+                            )
+                            rows = read_source_data(file_bytes, config['mapping'], db_type=db_key)
+
+                            # 讀取圖片
+                            step += 1
+                            progress_bar.progress(
+                                0.05 + 0.20 * (step / total_steps),
+                                text=f'讀取 {label} 圖片：{fname}...',
+                            )
+                            images = read_source_images(file_bytes, config['img_col'], db_type=db_key)
+                            logs.append(f"{label} / {fname}：{len(rows)} 筆資料 / {len(images)} 張圖片")
+
+                            # 計算圖片位移
+                            if db_key == 'merged':
+                                src_header_row = find_merged_header_row(file_bytes) or 2
+                                src_data_start = src_header_row + 1
+                            else:
+                                src_data_start = SOURCE_DATA_START
+                            row_offset = (MERGED_DATA_START - src_data_start) + len(all_rows)
+                            for src_row, img_info in images.items():
+                                img_info['orig_row'] = src_row
+                                all_images.append((img_info, row_offset))
+
+                            all_rows.extend(rows)
+                            db_row_count += len(rows)
+                            db_img_count += len(images)
+
+                        row_counts[db_key] = db_row_count
+                        img_counts[db_key] = db_img_count
+
+                    # 建立合併檔
+                    progress_bar.progress(0.30, text=f'建立合併檔（{len(all_rows)} 筆，{len(all_images)} 張圖片）...')
+                    output_bytes, count = create_merged_file(all_rows, all_images, header_data=_header_data, progress_bar=progress_bar)
+                    progress_bar.progress(1.0, text="合併完成！")
+
+                    # 執行記錄彙總
+                    logs.append("───────────────────")
+                    for db_key, label in DB_LABELS.items():
+                        rc = row_counts.get(db_key, 0)
+                        ic = img_counts.get(db_key, 0)
+                        fc = len(classified[db_key])
+                        if fc > 0:
+                            logs.append(f"{label}：{fc} 個檔案 → {rc} 筆 / {ic} 張圖片")
+                    logs.append(f"合計：{count} 筆 / {len(all_images)} 張圖片")
+
+                    # 儲存結果到 session_state，下載後頁面 rerun 時仍可顯示
+                    st.session_state.merge_done = True
+                    st.session_state.merge_output = output_bytes.getvalue()
+                    st.session_state.merge_count = count
+                    st.session_state.merge_img_count = len(all_images)
+                    st.session_state.merge_logs = logs
+                    client_now = _get_client_now()
+                    # 需求 5：yyyymmdd-TC-案號-商標監控結果清單(完整).xlsx
+                    if _case_number:
+                        st.session_state.merge_filename = f"{client_now.strftime('%Y%m%d')}-TC-{_case_number}-商標監控結果清單(完整).xlsx"
+                    else:
+                        st.session_state.merge_filename = f"{client_now.strftime('%Y%m%d_%H%M')}_合併檔.xlsx"
+                    st.session_state.merge_active_dbs = [
+                        (db_key, DB_LABELS[db_key], row_counts.get(db_key, 0), img_counts.get(db_key, 0), len(classified[db_key]))
+                        for db_key in DB_LABELS if len(classified[db_key]) > 0
+                    ]
+                    st.rerun()
+
+                except Exception as e:
+                    progress_bar.empty()
+                    st.error(f"❌ 合併失敗：{str(e)}")
+                    import traceback
+                    with st.expander("錯誤詳情"):
+                        st.code(traceback.format_exc())
+
+        # 下載後自動重置的 callback（同時寫入合併紀錄到 JSON 檔）
+        def _reset_after_download():
+            # 從 JSON 檔讀取既有紀錄
+            history = _load_merge_history()
+            # 記錄本次合併
+            record = {
+                'time': _get_client_now().strftime('%H:%M'),
+                'filename': st.session_state.get('merge_filename', ''),
+                'logs': st.session_state.get('merge_logs', []),
+                'count': st.session_state.get('merge_count', 0),
+                'img_count': st.session_state.get('merge_img_count', 0),
+            }
+            history.append(record)
+            _save_merge_history(history)
+            # 清除本次合併的暫存
+            for key in ['merge_done', 'merge_output', 'merge_count', 'merge_img_count',
+                         'merge_logs', 'merge_filename', 'merge_active_dbs']:
+                st.session_state.pop(key, None)
+            st.session_state.uploader_key += 1
+
+        # 合併完成後：持久顯示結果（即使下載觸發 rerun 也不會消失）
+        if st.session_state.merge_done:
+            st.balloons()
+            st.success("合併完成！")
+
+            # 顯示各來源統計
+            active_dbs = st.session_state.merge_active_dbs
+            result_cols = st.columns(len(active_dbs)) if active_dbs else st.columns(1)
+            for i, (db_key, label, rc, ic, fc) in enumerate(active_dbs):
+                with result_cols[i]:
+                    st.metric(f"{label}（{fc} 檔）", f"{rc} 筆", f"{ic} 張圖片")
+
+            st.markdown(f"### 合計：{st.session_state.merge_count} 筆資料 / {st.session_state.merge_img_count} 張圖片")
+
+            # 下載按鈕（點擊後自動重置頁面）
+            st.download_button(
+                label="⬇️ 下載合併檔",
+                data=st.session_state.merge_output,
+                file_name=st.session_state.merge_filename,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                type="primary",
+                use_container_width=True,
+                on_click=_reset_after_download,
+            )
+
+            # 執行記錄
+            with st.expander("📝 執行記錄"):
+                for log in st.session_state.merge_logs:
+                    st.text(log)
+
+    # ============================================================
+    # 合併紀錄（從 JSON 檔讀取，當日有效，隔日自動清空）
+    # ============================================================
+    _persisted_history = _load_merge_history()
+    if _persisted_history:
+        st.divider()
+        with st.expander(f"📋 今日合併紀錄（{len(_persisted_history)} 次）", expanded=False):
+            for i, rec in enumerate(reversed(_persisted_history), 1):
+                st.markdown(f"**{i}. {rec['time']}　→　{rec['filename']}**　"
+                            f"（{rec['count']} 筆 / {rec['img_count']} 張圖片）")
+                for log_line in rec['logs']:
+                    if log_line.startswith('──'):
+                        break
+                    st.caption(f"　　{log_line}")
+                if i < len(_persisted_history):
+                    st.markdown("---")
+
+# ============================================================
+# Tab 2: 下載公開說明書
+# ============================================================
+with tab_patent:
+    st.markdown("輸入專利號碼（每行一個，或上傳檔案），系統會自動查詢並下載公開說明書。")
     st.divider()
 
-    # 初始化 session_state
-    if 'merge_done' not in st.session_state:
-        st.session_state.merge_done = False
+    # -- API 帳號設定 --
+    with st.expander("⚙️ API 帳號設定", expanded=False):
+        st.caption("台灣專利公開資訊 API 帳號（由智慧財產局核發）")
+        _pat_col1, _pat_col2 = st.columns(2)
+        with _pat_col1:
+            _api_account = st.text_input("API 帳號", value="opdUser1181", key="tipo_account")
+        with _pat_col2:
+            _api_password = st.text_input("API 密碼", type="password", value="oelui4KQAY", key="tipo_password")
 
-    # 合併按鈕（僅在尚未合併時顯示，且必須有標題檔）
-    if not st.session_state.merge_done:
-        _can_merge = _header_ok and total_files > 0
-        if st.button("🚀 開始合併", type="primary", use_container_width=True, disabled=not _can_merge):
-            progress_bar = st.progress(0, text="開始處理...")
-            logs = []
+    st.divider()
 
-            try:
-                all_rows = []
-                all_images = []
-                row_counts = {}
-                img_counts = {}
+    # -- 專利號碼輸入 --
+    st.subheader("① 輸入專利號碼")
+    _input_method = st.radio(
+        "輸入方式",
+        ["直接輸入", "上傳檔案"],
+        horizontal=True,
+        key="patent_input_method",
+    )
 
-                # 定義處理順序和對應的設定
-                db_configs = {
-                    'merged': {'mapping': MERGED_FILE_MAPPING, 'img_col': MERGED_FILE_IMAGE_SRC_COL},
-                    'db1': {'mapping': DB1_MAPPING, 'img_col': DB1_IMAGE_SRC_COL},
-                    'db2': {'mapping': DB2_MAPPING_NO_REGION, 'img_col': DB2_IMAGE_SRC_COL},
-                    'db3': {'mapping': DB3_MAPPING, 'img_col': DB3_IMAGE_SRC_COL},
-                }
+    _patent_numbers_raw = []
 
-                step = 0
-                total_steps = total_files * 2  # 每個檔案讀資料 + 讀圖片
-                logs.append(f"合併檔標題 / {header_file.name}")
+    if _input_method == "直接輸入":
+        _patent_text = st.text_area(
+            "請輸入專利號碼（每行一個）",
+            height=200,
+            placeholder="例如：\nTW105131793\nUS20150001234A1\nCN201510879928A\n104142817",
+            key="patent_text_input",
+        )
+        if _patent_text.strip():
+            _patent_numbers_raw = parse_patent_numbers(_patent_text)
+    else:
+        _patent_file = st.file_uploader(
+            "上傳包含專利號碼的檔案",
+            type=["txt", "doc", "docx", "xlsx"],
+            accept_multiple_files=False,
+            key="patent_file_uploader",
+        )
+        if _patent_file:
+            _patent_numbers_raw = parse_file_for_patent_numbers(_patent_file)
 
-                # 按 合併檔 → db1 → db2 → db3 順序處理
-                for db_key in ['merged', 'db1', 'db2', 'db3']:
-                    files_list = classified[db_key]
-                    if not files_list:
+    # -- 解析結果顯示 --
+    if _patent_numbers_raw:
+        st.divider()
+        st.subheader("② 解析結果")
+
+        # 檢查是否有無國碼的號碼（需要使用者確認）
+        _has_bare = any(p["country"] == "" for p in _patent_numbers_raw)
+        _tw_numbers = [p for p in _patent_numbers_raw if p["country"] == "TW"]
+        _foreign_numbers = [p for p in _patent_numbers_raw if p["country"] not in ("TW", "")]
+        _bare_numbers = [p for p in _patent_numbers_raw if p["country"] == ""]
+
+        # 統計
+        _stats_cols = st.columns(4)
+        with _stats_cols[0]:
+            st.metric("總計", f"{len(_patent_numbers_raw)} 筆")
+        with _stats_cols[1]:
+            st.metric("🇹🇼 台灣", f"{len(_tw_numbers)} 筆")
+        with _stats_cols[2]:
+            st.metric("🌍 外國", f"{len(_foreign_numbers)} 筆")
+        with _stats_cols[3]:
+            st.metric("⚠️ 未指定國碼", f"{len(_bare_numbers)} 筆")
+
+        # 顯示清單
+        if _tw_numbers:
+            with st.expander(f"🇹🇼 台灣專利（{len(_tw_numbers)} 筆）— 可自動下載", expanded=True):
+                for p in _tw_numbers:
+                    st.text(f"  {p['raw']}")
+
+        if _foreign_numbers:
+            with st.expander(f"🌍 外國專利（{len(_foreign_numbers)} 筆）— 產生 GPSS 連結", expanded=True):
+                for p in _foreign_numbers:
+                    st.text(f"  {p['country']} {p['number']}")
+
+        if _bare_numbers:
+            st.warning("⚠️ 以下號碼未指定國碼，將預設為台灣案處理。若為外國案請加上國碼前綴（TW/US/CN/JP/EP/KR/WO）。")
+            with st.expander(f"⚠️ 未指定國碼（{len(_bare_numbers)} 筆）", expanded=True):
+                for p in _bare_numbers:
+                    st.text(f"  {p['number']}")
+
+        st.divider()
+
+        # -- 執行下載 --
+        st.subheader("③ 下載公開說明書")
+
+        # 初始化 session state
+        if 'patent_download_done' not in st.session_state:
+            st.session_state.patent_download_done = False
+
+        if not st.session_state.patent_download_done:
+            if st.button("🚀 開始查詢與下載", type="primary", use_container_width=True, key="btn_patent_download"):
+                _progress = st.progress(0, text="準備中...")
+                _results = []  # list of dict: {number, country, status, filename, data, error, gpss_link}
+                _downloaded_files = {}  # filename -> bytes
+
+                # 合併清單：台灣案 + 無國碼案（預設台灣）
+                _all_tw = _tw_numbers + _bare_numbers
+                _all_items = _all_tw + _foreign_numbers
+                _total = len(_all_items)
+
+                # -- 步驟 1：取得 TIPO API Token --
+                _token = None
+                if _all_tw:
+                    _progress.progress(0.02, text="取得 API Token...")
+                    try:
+                        _token = tipo_get_token(_api_account, _api_password)
+                    except Exception as e:
+                        st.error(f"❌ 無法取得 API Token：{e}")
+                        _token = None
+
+                # -- 步驟 2：處理台灣案 --
+                for idx, pat in enumerate(_all_tw):
+                    _num = pat["number"]
+                    _pct = 0.05 + 0.85 * (idx / _total)
+                    _progress.progress(_pct, text=f"查詢台灣案 {_num}... ({idx+1}/{_total})")
+
+                    result = {
+                        "number": _num,
+                        "country": "TW",
+                        "raw": pat["raw"],
+                        "status": "error",
+                        "filename": "",
+                        "data": None,
+                        "error": "",
+                        "gpss_link": "",
+                    }
+
+                    if not _token:
+                        result["error"] = "無 API Token"
+                        result["status"] = "error"
+                        _results.append(result)
                         continue
 
-                    config = db_configs[db_key]
-                    label = DB_LABELS[db_key]
-                    db_row_count = 0
-                    db_img_count = 0
+                    try:
+                        # 先查案件資訊
+                        case_info = tipo_get_case_info(_token, _num)
+                        case_no = None
+                        if case_info and "caseInformation" in case_info:
+                            info = case_info["caseInformation"]
+                            case_no = info.get("applicationNo", "").replace("-", "")
+                        if not case_no:
+                            case_no = _num  # fallback
 
-                    for fname, file_bytes in files_list:
-                        # 讀取資料
-                        step += 1
-                        progress_bar.progress(
-                            0.05 + 0.20 * (step / total_steps),
-                            text=f'讀取 {label}：{fname}...',
-                        )
-                        rows = read_source_data(file_bytes, config['mapping'], db_type=db_key)
+                        # 查檔案清單
+                        file_list = tipo_get_file_list(_token, case_no)
+                        spec = tipo_find_latest_specification(file_list)
 
-                        # 讀取圖片
-                        step += 1
-                        progress_bar.progress(
-                            0.05 + 0.20 * (step / total_steps),
-                            text=f'讀取 {label} 圖片：{fname}...',
-                        )
-                        images = read_source_images(file_bytes, config['img_col'], db_type=db_key)
-                        logs.append(f"{label} / {fname}：{len(rows)} 筆資料 / {len(images)} 張圖片")
-
-                        # 計算圖片位移
-                        if db_key == 'merged':
-                            src_header_row = find_merged_header_row(file_bytes) or 2
-                            src_data_start = src_header_row + 1
+                        if spec:
+                            # 下載說明書
+                            _progress.progress(_pct + 0.02, text=f"下載 {_num} 說明書...")
+                            pdf_bytes = tipo_download_file(_token, spec["fileURL"])
+                            fname = f"TW_{_num}_{spec['showName']}"
+                            if not fname.lower().endswith('.pdf'):
+                                fname += '.pdf'
+                            # 清理檔名中的非法字元
+                            fname = re.sub(r'[\\/:*?"<>|]', '_', fname)
+                            _downloaded_files[fname] = pdf_bytes
+                            result["status"] = "ok"
+                            result["filename"] = fname
+                            result["data"] = pdf_bytes
                         else:
-                            src_data_start = SOURCE_DATA_START
-                        row_offset = (MERGED_DATA_START - src_data_start) + len(all_rows)
-                        for src_row, img_info in images.items():
-                            img_info['orig_row'] = src_row
-                            all_images.append((img_info, row_offset))
+                            result["status"] = "not_found"
+                            result["error"] = "未找到說明書檔案"
 
-                        all_rows.extend(rows)
-                        db_row_count += len(rows)
-                        db_img_count += len(images)
+                    except Exception as e:
+                        result["status"] = "error"
+                        result["error"] = str(e)
 
-                    row_counts[db_key] = db_row_count
-                    img_counts[db_key] = db_img_count
+                    _results.append(result)
+                    time.sleep(0.3)  # 避免過快請求
 
-                # 建立合併檔
-                progress_bar.progress(0.30, text=f'建立合併檔（{len(all_rows)} 筆，{len(all_images)} 張圖片）...')
-                output_bytes, count = create_merged_file(all_rows, all_images, header_data=_header_data, progress_bar=progress_bar)
-                progress_bar.progress(1.0, text="合併完成！")
+                # -- 步驟 3：處理外國案（產生 GPSS 連結） --
+                for idx, pat in enumerate(_foreign_numbers):
+                    _num = pat["number"]
+                    _country = pat["country"]
+                    _pct = 0.05 + 0.85 * ((len(_all_tw) + idx) / _total)
+                    _progress.progress(_pct, text=f"產生 {_country} {_num} 連結... ({len(_all_tw)+idx+1}/{_total})")
 
-                # 執行記錄彙總
-                logs.append("───────────────────")
-                for db_key, label in DB_LABELS.items():
-                    rc = row_counts.get(db_key, 0)
-                    ic = img_counts.get(db_key, 0)
-                    fc = len(classified[db_key])
-                    if fc > 0:
-                        logs.append(f"{label}：{fc} 個檔案 → {rc} 筆 / {ic} 張圖片")
-                logs.append(f"合計：{count} 筆 / {len(all_images)} 張圖片")
+                    # 產生 GPSS 查詢連結
+                    gpss_link = f"https://gpss.tipo.gov.tw/gpsskmc/gpssbkm?searchText=PN%3D%22{_num}%22"
+                    _results.append({
+                        "number": _num,
+                        "country": _country,
+                        "raw": pat["raw"],
+                        "status": "link",
+                        "filename": "",
+                        "data": None,
+                        "error": "",
+                        "gpss_link": gpss_link,
+                    })
 
-                # 儲存結果到 session_state，下載後頁面 rerun 時仍可顯示
-                st.session_state.merge_done = True
-                st.session_state.merge_output = output_bytes.getvalue()
-                st.session_state.merge_count = count
-                st.session_state.merge_img_count = len(all_images)
-                st.session_state.merge_logs = logs
-                client_now = _get_client_now()
-                # 需求 5：yyyymmdd-TC-案號-商標監控結果清單(完整).xlsx
-                if _case_number:
-                    st.session_state.merge_filename = f"{client_now.strftime('%Y%m%d')}-TC-{_case_number}-商標監控結果清單(完整).xlsx"
-                else:
-                    st.session_state.merge_filename = f"{client_now.strftime('%Y%m%d_%H%M')}_合併檔.xlsx"
-                st.session_state.merge_active_dbs = [
-                    (db_key, DB_LABELS[db_key], row_counts.get(db_key, 0), img_counts.get(db_key, 0), len(classified[db_key]))
-                    for db_key in DB_LABELS if len(classified[db_key]) > 0
-                ]
+                _progress.progress(1.0, text="完成！")
+
+                # 儲存結果到 session_state
+                st.session_state.patent_download_done = True
+                st.session_state.patent_results = _results
+                st.session_state.patent_files = _downloaded_files
                 st.rerun()
 
-            except Exception as e:
-                progress_bar.empty()
-                st.error(f"❌ 合併失敗：{str(e)}")
-                import traceback
-                with st.expander("錯誤詳情"):
-                    st.code(traceback.format_exc())
+        # -- 顯示結果 --
+        if st.session_state.patent_download_done:
+            _results = st.session_state.get("patent_results", [])
+            _downloaded_files = st.session_state.get("patent_files", {})
 
-    # 下載後自動重置的 callback（同時寫入合併紀錄到 JSON 檔）
-    def _reset_after_download():
-        # 從 JSON 檔讀取既有紀錄
-        history = _load_merge_history()
-        # 記錄本次合併
-        record = {
-            'time': _get_client_now().strftime('%H:%M'),
-            'filename': st.session_state.get('merge_filename', ''),
-            'logs': st.session_state.get('merge_logs', []),
-            'count': st.session_state.get('merge_count', 0),
-            'img_count': st.session_state.get('merge_img_count', 0),
-        }
-        history.append(record)
-        _save_merge_history(history)
-        # 清除本次合併的暫存
-        for key in ['merge_done', 'merge_output', 'merge_count', 'merge_img_count',
-                     'merge_logs', 'merge_filename', 'merge_active_dbs']:
-            st.session_state.pop(key, None)
-        st.session_state.uploader_key += 1
+            _ok = [r for r in _results if r["status"] == "ok"]
+            _not_found = [r for r in _results if r["status"] == "not_found"]
+            _errors = [r for r in _results if r["status"] == "error"]
+            _links = [r for r in _results if r["status"] == "link"]
 
-    # 合併完成後：持久顯示結果（即使下載觸發 rerun 也不會消失）
-    if st.session_state.merge_done:
-        st.balloons()
-        st.success("合併完成！")
+            st.success(f"查詢完成！")
+            _res_cols = st.columns(4)
+            with _res_cols[0]:
+                st.metric("✅ 已下載", f"{len(_ok)} 筆")
+            with _res_cols[1]:
+                st.metric("🔗 GPSS 連結", f"{len(_links)} 筆")
+            with _res_cols[2]:
+                st.metric("⚠️ 未找到", f"{len(_not_found)} 筆")
+            with _res_cols[3]:
+                st.metric("❌ 錯誤", f"{len(_errors)} 筆")
 
-        # 顯示各來源統計
-        active_dbs = st.session_state.merge_active_dbs
-        result_cols = st.columns(len(active_dbs)) if active_dbs else st.columns(1)
-        for i, (db_key, label, rc, ic, fc) in enumerate(active_dbs):
-            with result_cols[i]:
-                st.metric(f"{label}（{fc} 檔）", f"{rc} 筆", f"{ic} 張圖片")
+            # 下載 ZIP
+            if _downloaded_files:
+                zip_buf = BytesIO()
+                with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+                    for fname, fdata in _downloaded_files.items():
+                        zf.writestr(fname, fdata)
+                zip_buf.seek(0)
 
-        st.markdown(f"### 合計：{st.session_state.merge_count} 筆資料 / {st.session_state.merge_img_count} 張圖片")
+                st.download_button(
+                    label=f"⬇️ 下載全部說明書（{len(_downloaded_files)} 個 PDF，ZIP 壓縮檔）",
+                    data=zip_buf.getvalue(),
+                    file_name=f"專利說明書_{datetime.now().strftime('%Y%m%d_%H%M')}.zip",
+                    mime="application/zip",
+                    type="primary",
+                    use_container_width=True,
+                )
 
-        # 下載按鈕（點擊後自動重置頁面）
-        st.download_button(
-            label="⬇️ 下載合併檔",
-            data=st.session_state.merge_output,
-            file_name=st.session_state.merge_filename,
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            type="primary",
-            use_container_width=True,
-            on_click=_reset_after_download,
-        )
+            # 詳細結果清單
+            if _ok:
+                with st.expander(f"✅ 已下載（{len(_ok)} 筆）", expanded=True):
+                    for r in _ok:
+                        st.markdown(f"- **{r['raw']}** → `{r['filename']}`")
 
-        # 執行記錄
-        with st.expander("📝 執行記錄"):
-            for log in st.session_state.merge_logs:
-                st.text(log)
+            if _links:
+                with st.expander(f"🔗 GPSS 連結（{len(_links)} 筆）— 請手動前往下載", expanded=True):
+                    for r in _links:
+                        st.markdown(f"- **{r['country']} {r['number']}** → [前往 GPSS 查詢]({r['gpss_link']})")
+
+            if _not_found:
+                with st.expander(f"⚠️ 未找到說明書（{len(_not_found)} 筆）", expanded=False):
+                    for r in _not_found:
+                        st.markdown(f"- **{r['raw']}**：{r['error']}")
+
+            if _errors:
+                with st.expander(f"❌ 查詢失敗（{len(_errors)} 筆）", expanded=False):
+                    for r in _errors:
+                        st.markdown(f"- **{r['raw']}**：{r['error']}")
+
+            # 重置按鈕
+            if st.button("🔄 重新查詢", key="btn_patent_reset"):
+                for key in ['patent_download_done', 'patent_results', 'patent_files']:
+                    st.session_state.pop(key, None)
+                st.rerun()
 
 # ============================================================
-# 合併紀錄（從 JSON 檔讀取，當日有效，隔日自動清空）
-# ============================================================
-_persisted_history = _load_merge_history()
-if _persisted_history:
-    st.divider()
-    with st.expander(f"📋 今日合併紀錄（{len(_persisted_history)} 次）", expanded=False):
-        for i, rec in enumerate(reversed(_persisted_history), 1):
-            st.markdown(f"**{i}. {rec['time']}　→　{rec['filename']}**　"
-                        f"（{rec['count']} 筆 / {rec['img_count']} 張圖片）")
-            for log_line in rec['logs']:
-                if log_line.startswith('──'):
-                    break
-                st.caption(f"　　{log_line}")
-            if i < len(_persisted_history):
-                st.markdown("---")
-
 # 頁尾
+# ============================================================
 st.divider()
-st.caption("商標監控資料合併工具 · 請上傳合併檔標題及資料檔案後進行合併。")
+st.caption("IP Winner 工具箱 · 商標監控資料合併 & 專利說明書下載")
 if _GIT_COMMIT_UTC:
-    # 將 git commit UTC 時間轉為使用者本地時區
     if isinstance(_client_tz_offset, (int, float)):
         _client_tz = timezone(timedelta(minutes=-int(_client_tz_offset)))
         _last_update_local = _GIT_COMMIT_UTC.astimezone(_client_tz)
