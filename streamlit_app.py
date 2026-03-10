@@ -16,7 +16,7 @@ import ssl
 import zipfile
 import time
 
-APP_VERSION = "v11"
+APP_VERSION = "v12"
 
 
 def _get_git_commit_utc():
@@ -117,7 +117,7 @@ def tipo_find_latest_specification(file_list_data):
 # GPSS API 模組（外國案查詢 + 連結產生）
 # ============================================================
 _GPSS_API_BASE = "https://tiponet.tipo.gov.tw/gpss1/gpsskmc/gpss_api"
-_GPSS_SEARCH_URL = "https://gpss.tipo.gov.tw/gpsskmc/gpssbkm"
+_GPSS_SEARCH_URL = "https://tiponet.tipo.gov.tw/gpss2/gpsskmc/gpssbkm"
 
 # 資料庫代碼對照
 _COUNTRY_DB_MAP = {
@@ -1685,8 +1685,9 @@ with tab_patent:
                     _pct = 0.05 + 0.85 * ((len(_all_tw) + idx) / _total)
                     _progress.progress(_pct, text=f"產生 {_country} {_num} 連結... ({len(_all_tw)+idx+1}/{_total})")
 
-                    # 產生 GPSS 查詢連結
-                    gpss_link = f"https://gpss.tipo.gov.tw/gpsskmc/gpssbkm?searchText=PN%3D%22{_num}%22"
+                    # 產生 GPSS 查詢連結（GPSS 使用 session-based URL，無法直接帶入搜尋條件，
+                    # 因此連結至首頁，使用者需手動貼上專利號查詢）
+                    gpss_link = "https://tiponet.tipo.gov.tw/gpss2/gpsskmc/gpssbkm"
                     _results.append({
                         "number": _num,
                         "country": _country,
@@ -1753,7 +1754,7 @@ with tab_patent:
             if _links:
                 with st.expander(f"🔗 GPSS 連結（{len(_links)} 筆）— 請手動前往下載", expanded=True):
                     for r in _links:
-                        st.markdown(f"- **{r['country']} {r['number']}** → [前往 GPSS 查詢]({r['gpss_link']})")
+                        st.markdown(f"- **{r['country']} {r['number']}** → `{r['number']}` [前往 GPSS 查詢]({r['gpss_link']})")
 
             if _not_found:
                 with st.expander(f"⚠️ 未找到說明書（{len(_not_found)} 筆）", expanded=False):
