@@ -1260,45 +1260,42 @@ DB_LABELS = {
 # ============================================================
 # Sidebar 導覽
 # ============================================================
+_PAGES = ["📋 合併檔案", "📥 下載公開說明書", "⚙️ 設定"]
+
+if 'current_page' not in st.session_state:
+    st.session_state.current_page = _PAGES[0]
+
 with st.sidebar:
     st.title("📋 IP Winner")
     st.divider()
 
-    # 隱藏 radio button 圓點，只保留文字
+    # sidebar 按鈕導覽樣式
     st.markdown("""
     <style>
-    /* sidebar radio: 美化外觀 */
-    section[data-testid="stSidebar"] [role="radiogroup"] label {
-        padding: 0.5rem 0.75rem;
-        border-radius: 0.5rem;
-        cursor: pointer;
+    section[data-testid="stSidebar"] button[kind="secondary"] {
+        background: none !important;
+        border: none !important;
+        box-shadow: none !important;
+        text-align: left !important;
+        padding: 0.5rem 0.75rem !important;
+        border-radius: 0.5rem !important;
+        width: 100% !important;
+        font-size: 1rem !important;
     }
-    section[data-testid="stSidebar"] [role="radiogroup"] label:hover {
-        background-color: rgba(151, 166, 195, 0.15);
-    }
-    /* sidebar radio: 暴力隱藏所有圓點相關元素 */
-    section[data-testid="stSidebar"] [role="radiogroup"] label > div:first-child,
-    section[data-testid="stSidebar"] [role="radiogroup"] [data-baseweb="radio"],
-    section[data-testid="stSidebar"] [role="radiogroup"] input[type="radio"],
-    section[data-testid="stSidebar"] [role="radiogroup"] svg,
-    section[data-testid="stSidebar"] .stRadio label > div:first-child,
-    section[data-testid="stSidebar"] .stRadio [data-baseweb="radio"],
-    section[data-testid="stSidebar"] .stRadio input[type="radio"],
-    section[data-testid="stSidebar"] .stRadio svg {
-        display: none !important;
-        width: 0 !important;
-        height: 0 !important;
-        overflow: hidden !important;
-        position: absolute !important;
+    section[data-testid="stSidebar"] button[kind="secondary"]:hover {
+        background-color: rgba(151, 166, 195, 0.15) !important;
     }
     </style>
     """, unsafe_allow_html=True)
 
-    _page = st.radio(
-        "功能選單",
-        ["📋 合併檔案", "📥 下載公開說明書", "⚙️ 設定"],
-        label_visibility="collapsed",
-    )
+    for _p in _PAGES:
+        _is_active = (st.session_state.current_page == _p)
+        _label = f"**{_p}**" if _is_active else _p
+        if st.button(_label, key=f"nav_{_p}", use_container_width=True):
+            st.session_state.current_page = _p
+            st.rerun()
+
+_page = st.session_state.current_page
 
 # ============================================================
 # 輔助函式：重置查詢 / 儲存歷史
