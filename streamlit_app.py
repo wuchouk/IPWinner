@@ -1288,6 +1288,33 @@ with st.sidebar:
     )
 
 # ============================================================
+# 輔助函式：重置查詢 / 儲存歷史
+# ============================================================
+def _reset_patent_query():
+    """清除當前查詢狀態並重置輸入框"""
+    for k in ['patent_download_done', 'patent_results', 'patent_files', 'patent_parsed']:
+        st.session_state.pop(k, None)
+    st.session_state.patent_input_key = st.session_state.get('patent_input_key', 0) + 1
+
+def _save_to_history():
+    """將當前查詢結果存入歷史紀錄"""
+    results = st.session_state.get('patent_results')
+    files = st.session_state.get('patent_files')
+    if not results:
+        return
+    if 'patent_history' not in st.session_state:
+        st.session_state.patent_history = []
+    entry = {
+        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M'),
+        'results': results,
+        'files': files or {},
+        'ok_count': sum(1 for r in results if r['status'] == 'ok'),
+        'link_count': sum(1 for r in results if r['status'] == 'link'),
+        'total': len(results),
+    }
+    st.session_state.patent_history.insert(0, entry)
+
+# ============================================================
 # 頁面 1: 合併檔案（原有功能）
 # ============================================================
 if _page == "📋 合併檔案":
@@ -1616,11 +1643,17 @@ elif _page == "📥 下載公開說明書":
 
     # -- 專利號碼輸入 --
     st.subheader("① 輸入專利號碼")
+
+    # 用遞增 key 實現重新查詢時清空輸入框
+    if 'patent_input_key' not in st.session_state:
+        st.session_state.patent_input_key = 0
+    _ik = st.session_state.patent_input_key
+
     _input_method = st.radio(
         "輸入方式",
         ["直接輸入", "上傳檔案"],
         horizontal=True,
-        key="patent_input_method",
+        key=f"patent_input_method_{_ik}",
     )
 
     if _input_method == "直接輸入":
@@ -1628,27 +1661,27 @@ elif _page == "📥 下載公開說明書":
             "請輸入專利號碼（每行一個）",
             height=200,
             placeholder="例如：\nTW105131793\nUS20150001234A1\nCN201510879928A\n104142817",
-            key="patent_text_input",
+            key=f"patent_text_input_{_ik}",
         )
     else:
         _patent_file = st.file_uploader(
             "上傳包含專利號碼的檔案",
             type=["txt", "doc", "docx", "xlsx"],
             accept_multiple_files=False,
-            key="patent_file_uploader",
+            key=f"patent_file_uploader_{_ik}",
         )
 
     st.caption("若號碼未指定國碼，將預設為台灣案處理。若為外國案請加上國碼前綴（TW/US/CN/JP/EP/KR/WO）。中國授權專利可用 ZL 前綴。")
 
     # -- 查詢按鈕（第一步：解析） --
-    _can_query = (_input_method == "直接輸入" and st.session_state.get("patent_text_input", "").strip()) or \
-                 (_input_method == "上傳檔案" and st.session_state.get("patent_file_uploader") is not None)
+    _can_query = (_input_method == "直接輸入" and st.session_state.get(f"patent_text_input_{_ik}", "").strip()) or \
+                 (_input_method == "上傳檔案" and st.session_state.get(f"patent_file_uploader_{_ik}") is not None)
 
     if st.button("🔍 查詢", type="primary", use_container_width=True, key="btn_patent_query", disabled=not _can_query):
         if _input_method == "直接輸入":
-            _parsed = parse_patent_numbers(st.session_state.get("patent_text_input", ""))
+            _parsed = parse_patent_numbers(st.session_state.get(f"patent_text_input_{_ik}", ""))
         else:
-            _parsed = parse_file_for_patent_numbers(st.session_state.get("patent_file_uploader"))
+            _parsed = parse_file_for_patent_numbers(st.session_state.get(f"patent_file_uploader_{_ik}"))
         st.session_state.patent_parsed = _parsed
         # 清除之前的下載結果
         for _k in ['patent_download_done', 'patent_results', 'patent_files']:
@@ -1915,15 +1948,66 @@ elif _page == "📥 下載公開說明書":
                     )
                 with _btn_col2:
                     if st.button("🔄 重新查詢", key="btn_patent_reset", use_container_width=True):
-                        for key in ['patent_download_done', 'patent_results', 'patent_files', 'patent_parsed']:
-                            st.session_state.pop(key, None)
+                        _save_to_history()
+                        _reset_patent_query()
                         st.rerun()
             else:
                 # 沒有可下載檔案時，只顯示重新查詢
                 if st.button("🔄 重新查詢", key="btn_patent_reset"):
-                    for key in ['patent_download_done', 'patent_results', 'patent_files', 'patent_parsed']:
-                        st.session_state.pop(key, None)
+                    _save_to_history()
+                    _reset_patent_query()
                     st.rerun()
+
+    # -- 查詢歷史紀錄 --
+    _history = st.session_state.get('patent_history', [])
+    if _history:
+        st.divider()
+        st.subheader("📜 查詢歷史")
+        for _hi, _entry in enumerate(_history):
+            _label = f"{_entry['timestamp']}（共 {_entry['total']} 筆：{_entry['ok_count']} 已下載 / {_entry['link_count']} GPSS 連結）"
+            with st.expander(_label, expanded=False):
+                _h_results = _entry['results']
+                _h_files = _entry['files']
+
+                _h_ok = [r for r in _h_results if r['status'] == 'ok']
+                _h_links = [r for r in _h_results if r['status'] == 'link']
+                _h_not_found = [r for r in _h_results if r['status'] == 'not_found']
+                _h_errors = [r for r in _h_results if r['status'] == 'error']
+
+                if _h_ok:
+                    st.markdown("**✅ 已下載：**")
+                    for r in _h_ok:
+                        st.markdown(f"- {r['raw']} → `{r['filename']}`")
+
+                if _h_links:
+                    st.markdown("**🔗 GPSS 連結：**")
+                    for r in _h_links:
+                        st.markdown(f"- {r['country']} {r['number']} → [前往 GPSS 查詢]({r['gpss_link']})")
+
+                if _h_not_found:
+                    st.markdown("**⚠️ 未找到：**")
+                    for r in _h_not_found:
+                        st.markdown(f"- {r['raw']}：{r['error']}")
+
+                if _h_errors:
+                    st.markdown("**❌ 錯誤：**")
+                    for r in _h_errors:
+                        st.markdown(f"- {r['raw']}：{r['error']}")
+
+                # 重新下載 ZIP
+                if _h_files:
+                    _zip_buf = BytesIO()
+                    with zipfile.ZipFile(_zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+                        for fname, fdata in _h_files.items():
+                            zf.writestr(fname, fdata)
+                    _zip_buf.seek(0)
+                    st.download_button(
+                        label=f"⬇️ 重新下載（{len(_h_files)} 個 PDF）",
+                        data=_zip_buf.getvalue(),
+                        file_name=f"專利說明書_{_entry['timestamp'].replace('-','').replace(':','').replace(' ','_')}.zip",
+                        mime="application/zip",
+                        key=f"btn_history_download_{_hi}",
+                    )
 
 # ============================================================
 # 頁面 3: 設定
