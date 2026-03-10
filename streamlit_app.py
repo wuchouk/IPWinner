@@ -166,8 +166,9 @@ _PATENT_PATTERNS = [
     (r'\b(TW)\s*([A-Z]?\d{6,}[A-Z]?\d*)\b', 'TW'),
     # US: US20150001234A1, US9876543B2, US2015/0001234
     (r'\b(US)\s*(\d{4,}/?[\d]+[A-Z]?\d*)\b', 'US'),
-    # CN: CN201510879928A, CN1234567B
+    # CN: CN201510879928A, CN1234567B, ZL202210112039.7（ZL 為中國授權專利前綴）
     (r'\b(CN)\s*(\d{6,}[A-Z]?\d*)\b', 'CN'),
+    (r'\b(ZL)\s*(\d{6,}[\d.]*)\b', 'CN'),  # ZL 開頭 → 視為 CN
     # JP: JP2015123456A
     (r'\b(JP)\s*(\d{4,}[A-Z]?\d*)\b', 'JP'),
     # EP: EP1234567A1
@@ -194,12 +195,25 @@ def parse_patent_numbers(text):
     for pattern, country in _PATENT_PATTERNS:
         for m in re.finditer(pattern, text, re.IGNORECASE):
             raw = m.group(0).strip()
+            prefix = m.group(1).upper()
             number = m.group(2).replace("/", "").replace(" ", "")
+            # ZL 開頭的保留完整號碼（含小數點），顯示時加回 ZL 前綴
+            if prefix == "ZL":
+                display_number = f"ZL{number}"
+            else:
+                display_number = number
             key = f"{country}_{number}"
             if key not in seen:
                 seen.add(key)
-                results.append({"country": country, "number": number, "raw": raw})
+                results.append({"country": country, "number": display_number, "raw": raw})
                 found_positions.update(range(m.start(), m.end()))
+
+    # 收集所有已識別的號碼（不含國碼前綴），用於 bare number dedup
+    _known_numbers = set()
+    for r in results:
+        # 取出純數字部分用於比對
+        _n = r["number"].replace("ZL", "").replace(".", "")
+        _known_numbers.add(_n)
 
     # 再找純數字（沒有國碼前綴的）
     for m in _BARE_NUMBER_PATTERN.finditer(text):
@@ -207,6 +221,9 @@ def parse_patent_numbers(text):
         if any(p in found_positions for p in range(m.start(), m.end())):
             continue
         number = m.group(1)
+        # 跳過已被其他國碼模式匹配到的相同號碼
+        if number in _known_numbers:
+            continue
         key = f"__{number}"
         if key not in seen:
             seen.add(key)
@@ -1603,7 +1620,7 @@ elif _page == "📥 下載公開說明書":
             key="patent_file_uploader",
         )
 
-    st.caption("若號碼未指定國碼，將預設為台灣案處理。若為外國案請加上國碼前綴（TW/US/CN/JP/EP/KR/WO）。")
+    st.caption("若號碼未指定國碼，將預設為台灣案處理。若為外國案請加上國碼前綴（TW/US/CN/JP/EP/KR/WO）。中國授權專利可用 ZL 前綴。")
 
     # -- 查詢按鈕（第一步：解析） --
     _can_query = (_input_method == "直接輸入" and st.session_state.get("patent_text_input", "").strip()) or \
