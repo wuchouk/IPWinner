@@ -15,8 +15,9 @@ import base64
 import ssl
 import zipfile
 import time
+import hashlib
 
-APP_VERSION = "v12"
+APP_VERSION = "v13"
 
 
 def _get_git_commit_utc():
@@ -248,12 +249,75 @@ def parse_file_for_patent_numbers(uploaded_file):
 
 
 # ============================================================
+# API 金鑰加密儲存模組
+# ============================================================
+_CRED_FILE = os.path.join(os.path.dirname(__file__), '.api_credentials.json')
+_ENC_KEY = hashlib.sha256(b"IPWinner2026SecretKey").digest()
+
+
+def _encrypt_str(text):
+    """簡易加密（XOR + base64）"""
+    encrypted = bytes([b ^ _ENC_KEY[i % len(_ENC_KEY)] for i, b in enumerate(text.encode('utf-8'))])
+    return base64.b64encode(encrypted).decode('ascii')
+
+
+def _decrypt_str(enc_text):
+    """簡易解密"""
+    data = base64.b64decode(enc_text)
+    decrypted = bytes([b ^ _ENC_KEY[i % len(_ENC_KEY)] for i, b in enumerate(data)])
+    return decrypted.decode('utf-8')
+
+
+def _get_user_id():
+    """取得使用者識別碼（Streamlit Cloud 有登入時用 email hash，否則用 'default'）"""
+    try:
+        user = st.experimental_user
+        if user and hasattr(user, 'email') and user.email:
+            return hashlib.md5(user.email.encode()).hexdigest()
+    except Exception:
+        pass
+    return "default"
+
+
+def _load_api_credentials():
+    """讀取當前使用者的 API 帳密"""
+    try:
+        with open(_CRED_FILE, 'r') as f:
+            data = json.load(f)
+        uid = _get_user_id()
+        if uid in data:
+            return {
+                'account': _decrypt_str(data[uid]['account']),
+                'password': _decrypt_str(data[uid]['password']),
+            }
+    except Exception:
+        pass
+    return None
+
+
+def _save_api_credentials(account, password):
+    """儲存當前使用者的 API 帳密（加密）"""
+    try:
+        with open(_CRED_FILE, 'r') as f:
+            data = json.load(f)
+    except Exception:
+        data = {}
+    uid = _get_user_id()
+    data[uid] = {
+        'account': _encrypt_str(account),
+        'password': _encrypt_str(password),
+    }
+    with open(_CRED_FILE, 'w') as f:
+        json.dump(data, f)
+
+
+# ============================================================
 # 頁面設定
 # ============================================================
 st.set_page_config(
-    page_title="商標監控資料合併工具",
+    page_title="IP Winner 工具箱",
     page_icon="📋",
-    layout="centered",
+    layout="wide",
 )
 
 # 自訂 CSS：拖放上傳區域放大 + 視覺提示 + 檔案列表一次顯示更多
@@ -1152,14 +1216,50 @@ DB_LABELS = {
     'db3': '資料庫 3',
 }
 
-st.title("📋 IP Winner 工具箱")
+# ============================================================
+# Sidebar 導覽 + API 設定
+# ============================================================
+with st.sidebar:
+    st.title("📋 IP Winner")
+    st.divider()
+    _page = st.radio(
+        "功能選單",
+        ["📋 合併檔案", "📥 下載公開說明書"],
+        label_visibility="collapsed",
+    )
+    st.divider()
 
-tab_merge, tab_patent = st.tabs(["📋 合併檔案", "📥 下載公開說明書"])
+    # -- API 金鑰管理 --
+    st.subheader("⚙️ API 設定")
+    st.caption("台灣專利公開資訊 API 帳號（由智慧財產局核發）")
+    _saved_creds = _load_api_credentials()
+    _api_account = st.text_input(
+        "API 帳號",
+        value=_saved_creds['account'] if _saved_creds else "",
+        key="tipo_account",
+    )
+    _api_password = st.text_input(
+        "API 密碼",
+        type="password",
+        value=_saved_creds['password'] if _saved_creds else "",
+        key="tipo_password",
+    )
+    if st.button("💾 儲存 API 設定", use_container_width=True):
+        if _api_account.strip() and _api_password.strip():
+            _save_api_credentials(_api_account.strip(), _api_password.strip())
+            st.success("✅ 已儲存（加密）")
+        else:
+            st.warning("請輸入帳號和密碼")
+    if _saved_creds:
+        st.caption("✅ 已有儲存的 API 帳號")
+    else:
+        st.caption("⚠️ 尚未儲存 API 帳號")
 
 # ============================================================
-# Tab 1: 合併檔案（原有功能）
+# 頁面 1: 合併檔案（原有功能）
 # ============================================================
-with tab_merge:
+if _page == "📋 合併檔案":
+    st.title("📋 合併檔案")
     st.markdown("上傳各資料庫的原始 Excel 檔（最多 15 個），系統會自動辨識來源並合併。也可同時放入舊的合併檔，系統會一起整合。")
 
     st.divider()
@@ -1464,21 +1564,11 @@ with tab_merge:
                     st.markdown("---")
 
 # ============================================================
-# Tab 2: 下載公開說明書
+# 頁面 2: 下載公開說明書
 # ============================================================
-with tab_patent:
-    st.markdown("輸入專利號碼（每行一個，或上傳檔案），系統會自動查詢並下載公開說明書。")
-    st.divider()
-
-    # -- API 帳號設定 --
-    with st.expander("⚙️ API 帳號設定", expanded=False):
-        st.caption("台灣專利公開資訊 API 帳號（由智慧財產局核發）")
-        _pat_col1, _pat_col2 = st.columns(2)
-        with _pat_col1:
-            _api_account = st.text_input("API 帳號", value="opdUser1181", key="tipo_account")
-        with _pat_col2:
-            _api_password = st.text_input("API 密碼", type="password", value="oelui4KQAY", key="tipo_password")
-
+elif _page == "📥 下載公開說明書":
+    st.title("📥 下載公開說明書")
+    st.markdown("輸入專利號碼（每行一個，或上傳檔案），點擊查詢後系統會自動查詢並下載公開說明書。")
     st.divider()
 
     # -- 專利號碼輸入 --
@@ -1490,8 +1580,6 @@ with tab_patent:
         key="patent_input_method",
     )
 
-    _patent_numbers_raw = []
-
     if _input_method == "直接輸入":
         _patent_text = st.text_area(
             "請輸入專利號碼（每行一個）",
@@ -1499,8 +1587,6 @@ with tab_patent:
             placeholder="例如：\nTW105131793\nUS20150001234A1\nCN201510879928A\n104142817",
             key="patent_text_input",
         )
-        if _patent_text.strip():
-            _patent_numbers_raw = parse_patent_numbers(_patent_text)
     else:
         _patent_file = st.file_uploader(
             "上傳包含專利號碼的檔案",
@@ -1508,10 +1594,26 @@ with tab_patent:
             accept_multiple_files=False,
             key="patent_file_uploader",
         )
-        if _patent_file:
-            _patent_numbers_raw = parse_file_for_patent_numbers(_patent_file)
 
-    # -- 解析結果顯示 --
+    st.caption("若號碼未指定國碼，將預設為台灣案處理。若為外國案請加上國碼前綴（TW/US/CN/JP/EP/KR/WO）。")
+
+    # -- 查詢按鈕（第一步：解析） --
+    _can_query = (_input_method == "直接輸入" and st.session_state.get("patent_text_input", "").strip()) or \
+                 (_input_method == "上傳檔案" and st.session_state.get("patent_file_uploader") is not None)
+
+    if st.button("🔍 查詢", type="primary", use_container_width=True, key="btn_patent_query", disabled=not _can_query):
+        if _input_method == "直接輸入":
+            _parsed = parse_patent_numbers(st.session_state.get("patent_text_input", ""))
+        else:
+            _parsed = parse_file_for_patent_numbers(st.session_state.get("patent_file_uploader"))
+        st.session_state.patent_parsed = _parsed
+        # 清除之前的下載結果
+        for _k in ['patent_download_done', 'patent_results', 'patent_files']:
+            st.session_state.pop(_k, None)
+        st.rerun()
+
+    # -- 解析結果顯示（點了查詢按鈕之後才顯示） --
+    _patent_numbers_raw = st.session_state.get("patent_parsed", [])
     if _patent_numbers_raw:
         st.divider()
         st.subheader("② 解析結果")
@@ -1545,7 +1647,7 @@ with tab_patent:
                     st.text(f"  {p['country']} {p['number']}")
 
         if _bare_numbers:
-            st.warning("⚠️ 以下號碼未指定國碼，將預設為台灣案處理。若為外國案請加上國碼前綴（TW/US/CN/JP/EP/KR/WO）。")
+            st.warning("⚠️ 以下號碼未指定國碼，將預設為台灣案處理。若為外國案請加上國碼前綴（TW/US/CN/JP/EP/KR/WO）。", icon="⚠️")
             with st.expander(f"⚠️ 未指定國碼（{len(_bare_numbers)} 筆）", expanded=True):
                 for p in _bare_numbers:
                     st.text(f"  {p['number']}")
@@ -1768,21 +1870,21 @@ with tab_patent:
 
             # 重置按鈕
             if st.button("🔄 重新查詢", key="btn_patent_reset"):
-                for key in ['patent_download_done', 'patent_results', 'patent_files']:
+                for key in ['patent_download_done', 'patent_results', 'patent_files', 'patent_parsed']:
                     st.session_state.pop(key, None)
                 st.rerun()
 
 # ============================================================
-# 頁尾
+# 頁尾（顯示在 sidebar 底部）
 # ============================================================
-st.divider()
-st.caption("IP Winner 工具箱 · 商標監控資料合併 & 專利說明書下載")
-if _GIT_COMMIT_UTC:
-    if isinstance(_client_tz_offset, (int, float)):
-        _client_tz = timezone(timedelta(minutes=-int(_client_tz_offset)))
-        _last_update_local = _GIT_COMMIT_UTC.astimezone(_client_tz)
+with st.sidebar:
+    st.divider()
+    if _GIT_COMMIT_UTC:
+        if isinstance(_client_tz_offset, (int, float)):
+            _client_tz = timezone(timedelta(minutes=-int(_client_tz_offset)))
+            _last_update_local = _GIT_COMMIT_UTC.astimezone(_client_tz)
+        else:
+            _last_update_local = _GIT_COMMIT_UTC
+        st.caption(f"{APP_VERSION} · {_last_update_local.strftime('%Y-%m-%d %H:%M')}")
     else:
-        _last_update_local = _GIT_COMMIT_UTC
-    st.caption(f"{APP_VERSION} · Last updated {_last_update_local.strftime('%Y-%m-%d %H:%M')}")
-else:
-    st.caption(f"{APP_VERSION}")
+        st.caption(f"{APP_VERSION}")
