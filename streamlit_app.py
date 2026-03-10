@@ -1286,6 +1286,10 @@ with st.sidebar:
     section[data-testid="stSidebar"] button[kind="secondary"]:hover {
         background-color: rgba(151, 166, 195, 0.15) !important;
     }
+    /* 覆蓋按鈕內層 div 的 justify-content: center */
+    section[data-testid="stSidebar"] button[kind="secondary"] > div {
+        justify-content: flex-start !important;
+    }
     </style>
     """, unsafe_allow_html=True)
 
