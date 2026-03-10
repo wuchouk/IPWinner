@@ -1267,27 +1267,29 @@ with st.sidebar:
     # 隱藏 radio button 圓點，只保留文字
     st.markdown("""
     <style>
-    div[data-testid="stSidebar"] .stRadio > div[role="radiogroup"] > label {
+    /* sidebar radio: 美化外觀 */
+    section[data-testid="stSidebar"] [role="radiogroup"] label {
         padding: 0.5rem 0.75rem;
         border-radius: 0.5rem;
         cursor: pointer;
     }
-    div[data-testid="stSidebar"] .stRadio > div[role="radiogroup"] > label:hover {
+    section[data-testid="stSidebar"] [role="radiogroup"] label:hover {
         background-color: rgba(151, 166, 195, 0.15);
     }
-    /* 隱藏 radio 圓點 — 相容多版本 Streamlit */
-    div[data-testid="stSidebar"] .stRadio > div[role="radiogroup"] > label > div:first-child {
+    /* sidebar radio: 暴力隱藏所有圓點相關元素 */
+    section[data-testid="stSidebar"] [role="radiogroup"] label > div:first-child,
+    section[data-testid="stSidebar"] [role="radiogroup"] [data-baseweb="radio"],
+    section[data-testid="stSidebar"] [role="radiogroup"] input[type="radio"],
+    section[data-testid="stSidebar"] [role="radiogroup"] svg,
+    section[data-testid="stSidebar"] .stRadio label > div:first-child,
+    section[data-testid="stSidebar"] .stRadio [data-baseweb="radio"],
+    section[data-testid="stSidebar"] .stRadio input[type="radio"],
+    section[data-testid="stSidebar"] .stRadio svg {
         display: none !important;
-    }
-    div[data-testid="stSidebar"] .stRadio [data-testid="stMarkdownContainer"] ~ div[data-testid="stRadio"] label > div:first-child,
-    div[data-testid="stSidebar"] [role="radiogroup"] label [data-baseweb="radio"] {
-        display: none !important;
-    }
-    div[data-testid="stSidebar"] [role="radiogroup"] label input[type="radio"] {
-        display: none !important;
-    }
-    div[data-testid="stSidebar"] [role="radiogroup"] label svg {
-        display: none !important;
+        width: 0 !important;
+        height: 0 !important;
+        overflow: hidden !important;
+        position: absolute !important;
     }
     </style>
     """, unsafe_allow_html=True)
@@ -1316,7 +1318,7 @@ def _save_to_history():
     if 'patent_history' not in st.session_state:
         st.session_state.patent_history = []
     entry = {
-        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M'),
+        'timestamp': _get_client_now().strftime('%Y-%m-%d %H:%M'),
         'results': results,
         'files': files or {},
         'ok_count': sum(1 for r in results if r['status'] == 'ok'),
