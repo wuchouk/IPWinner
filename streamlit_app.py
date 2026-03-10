@@ -1275,8 +1275,19 @@ with st.sidebar:
     div[data-testid="stSidebar"] .stRadio > div[role="radiogroup"] > label:hover {
         background-color: rgba(151, 166, 195, 0.15);
     }
+    /* 隱藏 radio 圓點 — 相容多版本 Streamlit */
     div[data-testid="stSidebar"] .stRadio > div[role="radiogroup"] > label > div:first-child {
-        display: none;
+        display: none !important;
+    }
+    div[data-testid="stSidebar"] .stRadio [data-testid="stMarkdownContainer"] ~ div[data-testid="stRadio"] label > div:first-child,
+    div[data-testid="stSidebar"] [role="radiogroup"] label [data-baseweb="radio"] {
+        display: none !important;
+    }
+    div[data-testid="stSidebar"] [role="radiogroup"] label input[type="radio"] {
+        display: none !important;
+    }
+    div[data-testid="stSidebar"] [role="radiogroup"] label svg {
+        display: none !important;
     }
     </style>
     """, unsafe_allow_html=True)
@@ -1941,7 +1952,7 @@ elif _page == "📥 下載公開說明書":
                     st.download_button(
                         label=f"⬇️ 下載全部說明書（{len(_downloaded_files)} 個 PDF，ZIP 壓縮檔）",
                         data=zip_buf.getvalue(),
-                        file_name=f"專利說明書_{datetime.now().strftime('%Y%m%d_%H%M')}.zip",
+                        file_name=f"專利說明書_{_get_client_now().strftime('%Y%m%d_%H%M')}.zip",
                         mime="application/zip",
                         type="primary",
                         use_container_width=True,
