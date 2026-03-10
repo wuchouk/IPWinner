@@ -1217,43 +1217,16 @@ DB_LABELS = {
 }
 
 # ============================================================
-# Sidebar 導覽 + API 設定
+# Sidebar 導覽
 # ============================================================
 with st.sidebar:
     st.title("📋 IP Winner")
     st.divider()
     _page = st.radio(
         "功能選單",
-        ["📋 合併檔案", "📥 下載公開說明書"],
+        ["📋 合併檔案", "📥 下載公開說明書", "⚙️ 設定"],
         label_visibility="collapsed",
     )
-    st.divider()
-
-    # -- API 金鑰管理 --
-    st.subheader("⚙️ API 設定")
-    st.caption("台灣專利公開資訊 API 帳號（由智慧財產局核發）")
-    _saved_creds = _load_api_credentials()
-    _api_account = st.text_input(
-        "API 帳號",
-        value=_saved_creds['account'] if _saved_creds else "",
-        key="tipo_account",
-    )
-    _api_password = st.text_input(
-        "API 密碼",
-        type="password",
-        value=_saved_creds['password'] if _saved_creds else "",
-        key="tipo_password",
-    )
-    if st.button("💾 儲存 API 設定", use_container_width=True):
-        if _api_account.strip() and _api_password.strip():
-            _save_api_credentials(_api_account.strip(), _api_password.strip())
-            st.success("✅ 已儲存（加密）")
-        else:
-            st.warning("請輸入帳號和密碼")
-    if _saved_creds:
-        st.caption("✅ 已有儲存的 API 帳號")
-    else:
-        st.caption("⚠️ 尚未儲存 API 帳號")
 
 # ============================================================
 # 頁面 1: 合併檔案（原有功能）
@@ -1569,6 +1542,14 @@ if _page == "📋 合併檔案":
 elif _page == "📥 下載公開說明書":
     st.title("📥 下載公開說明書")
     st.markdown("輸入專利號碼（每行一個，或上傳檔案），點擊查詢後系統會自動查詢並下載公開說明書。")
+
+    # 讀取已儲存的 API 帳密
+    _saved_creds = _load_api_credentials()
+    _api_account = _saved_creds['account'] if _saved_creds else ""
+    _api_password = _saved_creds['password'] if _saved_creds else ""
+    if not _saved_creds:
+        st.warning("⚠️ 尚未設定 API 帳號，請先至「⚙️ 設定」頁面儲存 API 帳密。")
+
     st.divider()
 
     # -- 專利號碼輸入 --
@@ -1873,6 +1854,47 @@ elif _page == "📥 下載公開說明書":
                 for key in ['patent_download_done', 'patent_results', 'patent_files', 'patent_parsed']:
                     st.session_state.pop(key, None)
                 st.rerun()
+
+# ============================================================
+# 頁面 3: 設定
+# ============================================================
+elif _page == "⚙️ 設定":
+    st.title("⚙️ 設定")
+
+    st.subheader("台灣專利公開資訊 API")
+    st.caption("由智慧財產局核發的 API 帳號密碼。每位使用者可各自儲存，帳密會加密保存。")
+
+    _saved_creds = _load_api_credentials()
+    _api_account = st.text_input(
+        "API 帳號",
+        value=_saved_creds['account'] if _saved_creds else "",
+        key="tipo_account",
+    )
+    _api_password = st.text_input(
+        "API 密碼",
+        type="password",
+        value=_saved_creds['password'] if _saved_creds else "",
+        key="tipo_password",
+    )
+
+    _col_save, _col_spacer = st.columns([1, 3])
+    with _col_save:
+        if st.button("💾 儲存", type="primary", use_container_width=True):
+            if _api_account.strip() and _api_password.strip():
+                _save_api_credentials(_api_account.strip(), _api_password.strip())
+                st.success("✅ 已儲存（加密）")
+            else:
+                st.warning("請輸入帳號和密碼")
+
+    if _saved_creds:
+        st.info("✅ 已有儲存的 API 帳號", icon="✅")
+    else:
+        st.warning("⚠️ 尚未儲存 API 帳號，請輸入後點擊儲存。", icon="⚠️")
+
+    st.divider()
+    st.subheader("GPSS API")
+    st.caption("全球專利檢索系統 API（需另外向智慧財產局申請 userCode）。取得後可於此填入，啟用外國專利自動下載功能。")
+    st.info("🚧 功能開發中，待取得 userCode 後啟用。", icon="🚧")
 
 # ============================================================
 # 頁尾（顯示在 sidebar 底部）
