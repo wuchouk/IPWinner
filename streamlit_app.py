@@ -1263,6 +1263,24 @@ DB_LABELS = {
 with st.sidebar:
     st.title("📋 IP Winner")
     st.divider()
+
+    # 隱藏 radio button 圓點，只保留文字
+    st.markdown("""
+    <style>
+    div[data-testid="stSidebar"] .stRadio > div[role="radiogroup"] > label {
+        padding: 0.5rem 0.75rem;
+        border-radius: 0.5rem;
+        cursor: pointer;
+    }
+    div[data-testid="stSidebar"] .stRadio > div[role="radiogroup"] > label:hover {
+        background-color: rgba(151, 166, 195, 0.15);
+    }
+    div[data-testid="stSidebar"] .stRadio > div[role="radiogroup"] > label > div:first-child {
+        display: none;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
     _page = st.radio(
         "功能選單",
         ["📋 合併檔案", "📥 下載公開說明書", "⚙️ 設定"],
@@ -1694,8 +1712,8 @@ elif _page == "📥 下載公開說明書":
 
                 # 合併清單：台灣案 + 無國碼案（預設台灣）
                 _all_tw = _tw_numbers + _bare_numbers
-                _all_items = _all_tw + _foreign_numbers
-                _total = len(_all_items)
+                _total_tw = len(_all_tw)
+                _total_foreign = len(_foreign_numbers)
 
                 # -- 步驟 1：取得 TIPO API Token --
                 _token = None
@@ -1708,10 +1726,11 @@ elif _page == "📥 下載公開說明書":
                         _token = None
 
                 # -- 步驟 2：處理台灣案 --
+                _total_steps = _total_tw + _total_foreign
                 for idx, pat in enumerate(_all_tw):
                     _num = pat["number"]
-                    _pct = 0.05 + 0.85 * (idx / _total)
-                    _progress.progress(_pct, text=f"查詢台灣案 {_num}... ({idx+1}/{_total})")
+                    _pct = 0.05 + 0.85 * (idx / max(_total_steps, 1))
+                    _progress.progress(_pct, text=f"下載台灣案 {_num}... ({idx+1}/{_total_tw})")
 
                     result = {
                         "number": _num,
@@ -1809,8 +1828,8 @@ elif _page == "📥 下載公開說明書":
                 for idx, pat in enumerate(_foreign_numbers):
                     _num = pat["number"]
                     _country = pat["country"]
-                    _pct = 0.05 + 0.85 * ((len(_all_tw) + idx) / _total)
-                    _progress.progress(_pct, text=f"產生 {_country} {_num} 連結... ({len(_all_tw)+idx+1}/{_total})")
+                    _pct = 0.05 + 0.85 * ((_total_tw + idx) / max(_total_steps, 1))
+                    _progress.progress(_pct, text=f"產生 {_country} {_num} 連結... ({idx+1}/{_total_foreign})")
 
                     # 產生 GPSS 查詢連結（GPSS 使用 session-based URL，無法直接帶入搜尋條件，
                     # 因此連結至首頁，使用者需手動貼上專利號查詢）
@@ -1855,23 +1874,6 @@ elif _page == "📥 下載公開說明書":
             with _res_cols[3]:
                 st.metric("❌ 錯誤", f"{len(_errors)} 筆")
 
-            # 下載 ZIP
-            if _downloaded_files:
-                zip_buf = BytesIO()
-                with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
-                    for fname, fdata in _downloaded_files.items():
-                        zf.writestr(fname, fdata)
-                zip_buf.seek(0)
-
-                st.download_button(
-                    label=f"⬇️ 下載全部說明書（{len(_downloaded_files)} 個 PDF，ZIP 壓縮檔）",
-                    data=zip_buf.getvalue(),
-                    file_name=f"專利說明書_{datetime.now().strftime('%Y%m%d_%H%M')}.zip",
-                    mime="application/zip",
-                    type="primary",
-                    use_container_width=True,
-                )
-
             # 詳細結果清單
             if _ok:
                 with st.expander(f"✅ 已下載（{len(_ok)} 筆）", expanded=True):
@@ -1893,11 +1895,35 @@ elif _page == "📥 下載公開說明書":
                     for r in _errors:
                         st.markdown(f"- **{r['raw']}**：{r['error']}")
 
-            # 重置按鈕
-            if st.button("🔄 重新查詢", key="btn_patent_reset"):
-                for key in ['patent_download_done', 'patent_results', 'patent_files', 'patent_parsed']:
-                    st.session_state.pop(key, None)
-                st.rerun()
+            # 下載 ZIP + 重新查詢（並排）
+            if _downloaded_files:
+                zip_buf = BytesIO()
+                with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+                    for fname, fdata in _downloaded_files.items():
+                        zf.writestr(fname, fdata)
+                zip_buf.seek(0)
+
+                _btn_col1, _btn_col2 = st.columns([2, 1])
+                with _btn_col1:
+                    st.download_button(
+                        label=f"⬇️ 下載全部說明書（{len(_downloaded_files)} 個 PDF，ZIP 壓縮檔）",
+                        data=zip_buf.getvalue(),
+                        file_name=f"專利說明書_{datetime.now().strftime('%Y%m%d_%H%M')}.zip",
+                        mime="application/zip",
+                        type="primary",
+                        use_container_width=True,
+                    )
+                with _btn_col2:
+                    if st.button("🔄 重新查詢", key="btn_patent_reset", use_container_width=True):
+                        for key in ['patent_download_done', 'patent_results', 'patent_files', 'patent_parsed']:
+                            st.session_state.pop(key, None)
+                        st.rerun()
+            else:
+                # 沒有可下載檔案時，只顯示重新查詢
+                if st.button("🔄 重新查詢", key="btn_patent_reset"):
+                    for key in ['patent_download_done', 'patent_results', 'patent_files', 'patent_parsed']:
+                        st.session_state.pop(key, None)
+                    st.rerun()
 
 # ============================================================
 # 頁面 3: 設定
