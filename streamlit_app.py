@@ -1277,6 +1277,7 @@ with st.sidebar:
         border: none !important;
         box-shadow: none !important;
         text-align: left !important;
+        justify-content: flex-start !important;
         padding: 0.5rem 0.75rem !important;
         border-radius: 0.5rem !important;
         width: 100% !important;
