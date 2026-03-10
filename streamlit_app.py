@@ -55,9 +55,23 @@ def tipo_get_token(account, password):
         return resp.read().decode("utf-8").strip()
 
 
+def _strip_tw_prefix(patent_id):
+    """去除 TW 前綴和 A/B 後綴，保留 I/M/D 前綴。
+    例：TW202421040A → 202421040, TWI740797 → I740797, TW I756159 → I756159"""
+    s = patent_id.strip()
+    # 去掉 TW 前綴（含可能的空格）
+    if s.upper().startswith("TW"):
+        s = s[2:].lstrip()
+    # 去掉尾部的 A1/A2/B1/B2 等後綴（但不影響 I/M/D 開頭的號碼）
+    s = re.sub(r'[AB]\d*$', '', s)
+    return s
+
+
 def tipo_get_case_info(token, case_id):
-    """查詢專利案件基本資訊（可用申請案號、公開號、公告號）"""
-    req = urllib.request.Request(f"{_TIPO_API_BASE}/getCaseInfo/{case_id}")
+    """查詢專利案件基本資訊（可用申請案號、公開號、公告號）。
+    自動去除 TW 前綴。回傳 dict（新版 API 直接回傳欄位，不包裹 caseInformation）。"""
+    clean_id = _strip_tw_prefix(case_id)
+    req = urllib.request.Request(f"{_TIPO_API_BASE}/getCaseInfo/{clean_id}")
     req.add_header("Authorization", f"Bearer {token}")
     with urllib.request.urlopen(req, timeout=30, context=_SSL_CTX) as resp:
         return json.loads(resp.read().decode("utf-8"))
@@ -1590,20 +1604,27 @@ with tab_patent:
                         continue
 
                     try:
-                        # 先查案件資訊
+                        # 先查案件資訊（API 會自動去除 TW 前綴）
                         case_info = tipo_get_case_info(_token, _num)
                         case_no = None
-                        if case_info and "caseInformation" in case_info:
+                        # 新版 API 直接回傳欄位（不包裹 caseInformation）
+                        if case_info and case_info.get("code") == "00":
+                            case_no = case_info.get("caseNo", "").replace("-", "")
+                        # 舊版 API 相容
+                        elif case_info and "caseInformation" in case_info:
                             info = case_info["caseInformation"]
                             case_no = info.get("applicationNo", "").replace("-", "")
                         if not case_no:
-                            case_no = _num  # fallback
+                            case_no = _strip_tw_prefix(_num)  # fallback
+
+                        time.sleep(1.5)  # rate limiting 保護
 
                         # 查檔案清單
                         file_list = tipo_get_file_list(_token, case_no)
                         spec = tipo_find_latest_specification(file_list)
 
                         if spec:
+                            time.sleep(1.5)  # rate limiting 保護
                             # 下載說明書
                             _progress.progress(_pct + 0.02, text=f"下載 {_num} 說明書...")
                             pdf_bytes = tipo_download_file(_token, spec["fileURL"])
@@ -1620,12 +1641,42 @@ with tab_patent:
                             result["status"] = "not_found"
                             result["error"] = "未找到說明書檔案"
 
+                    except urllib.error.HTTPError as e:
+                        if e.code == 403:
+                            # Rate limiting — 等待後重試一次
+                            time.sleep(5)
+                            try:
+                                case_info = tipo_get_case_info(_token, _num)
+                                case_no = case_info.get("caseNo", "").replace("-", "") if case_info and case_info.get("code") == "00" else _strip_tw_prefix(_num)
+                                time.sleep(2)
+                                file_list = tipo_get_file_list(_token, case_no)
+                                spec = tipo_find_latest_specification(file_list)
+                                if spec:
+                                    time.sleep(2)
+                                    pdf_bytes = tipo_download_file(_token, spec["fileURL"])
+                                    fname = f"TW_{_num}_{spec['showName']}"
+                                    if not fname.lower().endswith('.pdf'):
+                                        fname += '.pdf'
+                                    fname = re.sub(r'[\\/:*?"<>|]', '_', fname)
+                                    _downloaded_files[fname] = pdf_bytes
+                                    result["status"] = "ok"
+                                    result["filename"] = fname
+                                    result["data"] = pdf_bytes
+                                else:
+                                    result["status"] = "not_found"
+                                    result["error"] = "未找到說明書檔案"
+                            except Exception as e2:
+                                result["status"] = "error"
+                                result["error"] = f"重試失敗：{e2}"
+                        else:
+                            result["status"] = "error"
+                            result["error"] = str(e)
                     except Exception as e:
                         result["status"] = "error"
                         result["error"] = str(e)
 
                     _results.append(result)
-                    time.sleep(0.3)  # 避免過快請求
+                    time.sleep(1.5)  # rate limiting 保護
 
                 # -- 步驟 3：處理外國案（產生 GPSS 連結） --
                 for idx, pat in enumerate(_foreign_numbers):
