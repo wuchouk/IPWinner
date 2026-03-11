@@ -120,15 +120,18 @@ def tipo_find_latest_specification(file_list_data):
 _GPSS_API_BASE = "https://tiponet.tipo.gov.tw/gpss1/gpsskmc/gpss_api"
 _GPSS_SEARCH_URL = "https://tiponet.tipo.gov.tw/gpss2/gpsskmc/gpssbkm"
 
-# 資料庫代碼對照
+# 資料庫代碼對照（完整版，依據 GPSS API v1.4 官方文件）
+# A=公開/申請, B=公告/核准, D=設計
 _COUNTRY_DB_MAP = {
-    "TW": ["TWA", "TWB"],
-    "US": ["USA", "USB"],
-    "CN": ["CNA", "CNB"],
-    "JP": ["JPA", "JPB"],
-    "EP": ["EPA", "EPB"],
-    "KR": ["KPA", "KPB"],
+    "TW": ["TWA", "TWB", "TWD"],
+    "US": ["USA", "USB", "USD"],
+    "CN": ["CNA", "CNB", "CND"],
+    "JP": ["JPA", "JPB", "JPD"],
+    "EP": ["EPA", "EPB", "EUIPO"],
+    "KR": ["KPA", "KPB", "KPD"],
     "WO": ["WO"],
+    "SE": ["SEAA", "SEAB"],      # 東南亞（含東協各國）
+    "OT": ["OTA", "OTB"],        # 其他國家
 }
 
 # 反向：從 DB 代碼推回國家
@@ -138,14 +141,15 @@ for _c, _dbs in _COUNTRY_DB_MAP.items():
         _DB_TO_COUNTRY[_d] = _c
 
 
-def gpss_search(user_code, patent_number, pat_db=None):
+def gpss_search(user_code, patent_number, pat_db=None, exp_fld=None):
     """用 GPSS API 查詢專利（用 PN 或 AN）。回傳 JSON dict 或 None。"""
     params = f"userCode={user_code}"
     if pat_db:
         params += f"&patDB={pat_db}"
-    # 先用 PN 查
     params += f"&PN={patent_number}"
-    params += "&expFld=PN,ID,AN,AD,TI&expFmt=json&expQty=5"
+    # 預設輸出欄位：公告號、申請號、公告日、名稱、申請人、發明人
+    fields = exp_fld or "PN,ID,AN,AD,TI,PA,IN"
+    params += f"&expFld={fields}&expFmt=json&expQty=5"
     url = f"{_GPSS_API_BASE}?{params}"
     req = urllib.request.Request(url)
     req.add_header("User-Agent", "Mozilla/5.0")
@@ -155,6 +159,47 @@ def gpss_search(user_code, patent_number, pat_db=None):
             return data
     except Exception:
         return None
+
+
+def gpss_verify_patent(user_code, country, number):
+    """
+    用 GPSS API 驗證專利是否存在，並回傳 API 提供的精確公告號碼。
+    回傳 dict: {"found": bool, "doc_number": str, "title": str, "db": str}
+    精確的 doc_number 可用來建構更準確的 Google Patents URL。
+    """
+    result = {"found": False, "doc_number": "", "title": "", "db": ""}
+    dbs = _COUNTRY_DB_MAP.get(country, [])
+    if not dbs:
+        return result
+
+    for db in dbs:
+        data = gpss_search(user_code, number, pat_db=db)
+        if not data:
+            continue
+        try:
+            # 解析 JSON 結構：gpss-API.patent.patentcontent[]
+            patent_node = data.get("gpss-API", {}).get("patent", {})
+            contents = patent_node.get("patentcontent", [])
+            if isinstance(contents, dict):
+                contents = [contents]
+            if not contents:
+                continue
+            pc = contents[0]
+            pub_ref = pc.get("publication-reference", {})
+            doc_num = pub_ref.get("doc-number", "")
+            title_node = pc.get("patent-title", "")
+            if isinstance(title_node, dict):
+                title_node = title_node.get("#text", "")
+            if doc_num:
+                result["found"] = True
+                result["doc_number"] = doc_num
+                result["title"] = title_node
+                result["db"] = db
+                return result
+        except Exception:
+            continue
+
+    return result
 
 
 # ============================================================
@@ -1977,15 +2022,25 @@ elif _page == "📥 下載公開說明書":
                     _results.append(result)
                     time.sleep(1.5)  # rate limiting 保護
 
-                # -- 步驟 3：處理外國案（產生各國專利資料庫直接連結） --
+                # -- 步驟 3：處理外國案（GPSS API 驗證 + 各國專利資料庫直接連結） --
+                _gpss_user_code = "963bED2F36842DCD"
                 for idx, pat in enumerate(_foreign_numbers):
                     _num = pat["number"]
                     _country = pat["country"]
                     _pct = 0.05 + 0.85 * ((_total_tw + idx) / max(_total_steps, 1))
-                    _progress.progress(_pct, text=f"產生 {_country} {_num} 連結... ({idx+1}/{_total_foreign})")
+                    _progress.progress(_pct, text=f"驗證 {_country} {_num}... ({idx+1}/{_total_foreign})")
+
+                    # 用 GPSS API 驗證專利並取得精確的 doc-number
+                    _verified = gpss_verify_patent(_gpss_user_code, _country, _num)
+                    # 如果 API 回傳了精確號碼，用它來產生更準確的連結
+                    _link_num = _num
+                    _api_title = ""
+                    if _verified["found"] and _verified["doc_number"]:
+                        _link_num = _verified["doc_number"]
+                        _api_title = _verified["title"]
 
                     # 產生各國專利資料庫直接連結
-                    patent_links = _build_foreign_patent_links(_country, _num)
+                    patent_links = _build_foreign_patent_links(_country, _link_num)
                     _results.append({
                         "number": _num,
                         "country": _country,
@@ -1996,6 +2051,9 @@ elif _page == "📥 下載公開說明書":
                         "error": "",
                         "patent_links": patent_links,
                         "gpss_link": patent_links[0]["url"] if patent_links else "",
+                        "verified": _verified["found"],
+                        "api_doc_number": _verified.get("doc_number", ""),
+                        "api_title": _api_title,
                     })
 
                 _progress.progress(1.0, text="完成！")
@@ -2037,13 +2095,17 @@ elif _page == "📥 下載公開說明書":
                 with st.expander(f"🔗 外國案連結（{len(_links)} 筆）— 點擊前往各國專利資料庫", expanded=True):
                     for r in _links:
                         _pl = r.get("patent_links", [])
+                        _badge = "✅" if r.get("verified") else "🔍"
+                        _title_str = ""
+                        if r.get("api_title"):
+                            _title_str = f" — {r['api_title'][:60]}"
                         if _pl:
                             _link_parts = " ｜ ".join(
                                 f"[{lnk['source']}]({lnk['url']})" for lnk in _pl
                             )
-                            st.markdown(f"- **{r['country']} {r['number']}** → {_link_parts}")
+                            st.markdown(f"- {_badge} **{r['country']} {r['number']}**{_title_str} → {_link_parts}")
                         else:
-                            st.markdown(f"- **{r['country']} {r['number']}** → `{r['number']}`")
+                            st.markdown(f"- {_badge} **{r['country']} {r['number']}**{_title_str} → `{r['number']}`")
 
             if _not_found:
                 with st.expander(f"⚠️ 未找到說明書（{len(_not_found)} 筆）", expanded=False):
