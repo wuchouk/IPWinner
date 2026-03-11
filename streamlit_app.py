@@ -216,95 +216,92 @@ def _build_foreign_patent_links(country, number):
     clean_num = number.strip()
     if country and clean_num.upper().startswith(country.upper()):
         clean_num = clean_num[len(country):]
+    # 處理 ZL 前綴（中國授權專利）：ZL202210112039.7 → 202210112039
+    _is_zl = False
+    if clean_num.upper().startswith("ZL"):
+        _is_zl = True
+        clean_num = clean_num[2:]  # 去掉 "ZL"
+    # 去掉校驗碼小數點（如 .7, .X）— 適用於 CN 申請號
+    _cn_app_num = re.sub(r'\.\w$', '', clean_num) if country == "CN" else clean_num
 
     if country == "US":
-        # Google Patents
+        # Google Patents（主要來源，有 Download PDF 按鈕）
         links.append({
             "source": "Google Patents",
             "url": f"https://patents.google.com/patent/US{clean_num}",
         })
-        # USPTO Full-Text (application)
-        # 格式判斷：如果是 7 位以上純數字 → 授權號；如果含 "/" 或以 "20" 開頭 → 申請號
-        digits_only = clean_num.replace(",", "").replace(" ", "")
-        if "/" in clean_num:
-            # 申請號格式 e.g. 16/123,456
-            links.append({
-                "source": "USPTO",
-                "url": f"https://patft.uspto.gov/netacgi/nph-Parser?Sect1=PTO1&Sect2=HITOFF&p=1&u=/netahtml/PTO/srchnum.htm&r=1&f=G&l=50&d=PALL&s1={clean_num}.PN.",
-            })
-        else:
-            links.append({
-                "source": "USPTO",
-                "url": f"https://patft.uspto.gov/netacgi/nph-Parser?Sect1=PTO1&Sect2=HITOFF&p=1&u=/netahtml/PTO/srchnum.htm&r=1&f=G&l=50&d=PALL&s1={digits_only}.PN.",
-            })
-
-    elif country == "CN":
-        # Google Patents（最穩定的中國專利 PDF 來源）
+        # USPTO Patent Public Search（新版全文檢索系統，直接下載 PDF）
+        # 去除後綴（A1/B2 等）只保留數字部分
+        _us_num = re.sub(r'[A-Z]\d*$', '', clean_num, flags=re.IGNORECASE)
         links.append({
-            "source": "Google Patents",
-            "url": f"https://patents.google.com/patent/CN{clean_num}",
+            "source": "USPTO PDF",
+            "url": f"https://ppubs.uspto.gov/dirsearch-public/print/downloadPdf/{_us_num}",
         })
 
+    elif country == "CN":
+        if _is_zl:
+            # ZL 授權號 → 用申請號查 Google Patents（去掉校驗碼）
+            links.append({
+                "source": "Google Patents",
+                "url": f"https://patents.google.com/patent/CN{_cn_app_num}",
+            })
+            # Espacenet 用申請號查（比 Google Patents 更能處理申請號格式）
+            links.append({
+                "source": "Espacenet",
+                "url": f"https://worldwide.espacenet.com/patent/search?q=pn%3DCN{_cn_app_num}",
+            })
+        else:
+            # 公開號 / 公告號 → 直接用
+            links.append({
+                "source": "Google Patents",
+                "url": f"https://patents.google.com/patent/CN{clean_num}",
+            })
+
     elif country == "JP":
-        # Google Patents
         links.append({
             "source": "Google Patents",
             "url": f"https://patents.google.com/patent/JP{clean_num}",
         })
-        # J-PlatPat
         links.append({
             "source": "J-PlatPat",
             "url": f"https://www.j-platpat.inpit.go.jp/c1801/PU/JP-{clean_num}/11/ja",
         })
 
     elif country == "EP":
-        # Espacenet（歐洲專利局，可直接看 PDF）
         links.append({
             "source": "Espacenet",
             "url": f"https://worldwide.espacenet.com/patent/search?q=pn%3DEP{clean_num}",
         })
-        # Google Patents
         links.append({
             "source": "Google Patents",
             "url": f"https://patents.google.com/patent/EP{clean_num}",
         })
 
     elif country == "KR":
-        # Google Patents
         links.append({
             "source": "Google Patents",
             "url": f"https://patents.google.com/patent/KR{clean_num}",
         })
-        # KIPRIS（韓國智慧財產局）
         links.append({
             "source": "KIPRIS",
             "url": f"https://kpat.kipris.or.kr/kpat/searchLogina.do?next=MainSearch&lng=en",
         })
 
     elif country == "WO":
-        # Google Patents
         links.append({
             "source": "Google Patents",
             "url": f"https://patents.google.com/patent/WO{clean_num}",
         })
-        # WIPO PATENTSCOPE
         links.append({
             "source": "PATENTSCOPE",
             "url": f"https://patentscope.wipo.int/search/en/detail.jsf?docId=WO{clean_num}",
         })
 
     else:
-        # 其他國家：fallback 到 Google Patents
         links.append({
             "source": "Google Patents",
             "url": f"https://patents.google.com/patent/{country}{clean_num}",
         })
-
-    # 所有外國案都附上 GPSS 作為備用來源
-    links.append({
-        "source": "GPSS",
-        "url": "https://tiponet.tipo.gov.tw/gpss2/gpsskmc/gpssbkm",
-    })
 
     return links
 
