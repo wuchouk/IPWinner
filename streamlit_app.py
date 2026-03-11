@@ -17,7 +17,7 @@ import zipfile
 import time
 import hashlib
 
-APP_VERSION = "v13"
+APP_VERSION = "v14"
 
 
 def _get_git_commit_utc():
@@ -219,6 +219,97 @@ def gpss_verify_patent(user_code, country, number, search_by_an=False):
             return result
 
     return result
+
+
+# ============================================================
+# Google Patents PDF 下載模組
+# ============================================================
+
+def google_patents_get_pdf_url(patent_id):
+    """
+    從 Google Patents 頁面取得 PDF 下載 URL。
+    patent_id: 完整的 Google Patents ID，如 "US20220144615A1", "CN114431708A", "JP2022033723A"
+    回傳 PDF URL 字串，或 None（取得失敗時）。
+
+    原理：Google Patents 頁面的 <meta name="citation_pdf_url"> 標籤
+    包含 patentimages.storage.googleapis.com 上的直接 PDF 連結。
+    """
+    url = f"https://patents.google.com/patent/{patent_id}"
+    req = urllib.request.Request(url)
+    req.add_header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+    try:
+        with urllib.request.urlopen(req, timeout=30, context=_SSL_CTX) as resp:
+            html = resp.read().decode("utf-8", errors="replace")
+        # 解析 <meta name="citation_pdf_url" content="...">
+        m = re.search(
+            r'<meta\s+name=["\']citation_pdf_url["\']\s+content=["\']([^"\']+)["\']',
+            html,
+        )
+        if m:
+            return m.group(1)
+        # 也嘗試反向屬性順序 <meta content="..." name="citation_pdf_url">
+        m2 = re.search(
+            r'<meta\s+content=["\']([^"\']+)["\']\s+name=["\']citation_pdf_url["\']',
+            html,
+        )
+        if m2:
+            return m2.group(1)
+        return None
+    except Exception:
+        return None
+
+
+def google_patents_download_pdf(patent_id):
+    """
+    從 Google Patents 下載專利 PDF。
+    patent_id: 完整的 Google Patents ID（含國碼），如 "US20220144615A1"
+    回傳 (pdf_bytes, filename) 或 (None, error_message)。
+    """
+    pdf_url = google_patents_get_pdf_url(patent_id)
+    if not pdf_url:
+        return None, "無法從 Google Patents 取得 PDF 連結"
+    # 下載 PDF
+    req = urllib.request.Request(pdf_url)
+    req.add_header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+    try:
+        with urllib.request.urlopen(req, timeout=120, context=_SSL_CTX) as resp:
+            data = resp.read()
+            # 驗證是否為有效 PDF（前 4 bytes 應為 %PDF）
+            if not data or not data[:4] == b'%PDF':
+                return None, "下載的檔案不是有效的 PDF"
+            filename = f"{patent_id}.pdf"
+            return data, filename
+    except urllib.error.HTTPError as e:
+        return None, f"下載失敗 (HTTP {e.code})"
+    except Exception as e:
+        return None, f"下載失敗：{e}"
+
+
+def _build_google_patent_id(country, number, pub_number=""):
+    """
+    根據國碼和號碼組合出 Google Patents 的 patent ID。
+    回傳字串如 "US20220144615A1", "CN114431708A" 等。
+    若為 ZL 案且有 pub_number，使用 pub_number。
+    """
+    clean_num = number.strip()
+    # 去掉國碼前綴（避免重複）
+    if country and clean_num.upper().startswith(country.upper()):
+        clean_num = clean_num[len(country):]
+    # ZL 處理
+    _is_zl = clean_num.upper().startswith("ZL")
+    if _is_zl:
+        clean_num = clean_num[2:]
+    _pub = pub_number.strip()
+    if country and _pub.upper().startswith(country.upper()):
+        _pub = _pub[len(country):]
+
+    if _is_zl and _pub:
+        return f"{country}{_pub}"
+    elif _is_zl:
+        # ZL 但沒有 pub_number → 無法建構精確 ID
+        return ""
+    else:
+        return f"{country}{clean_num}"
 
 
 # ============================================================
@@ -2054,13 +2145,13 @@ elif _page == "📥 下載公開說明書":
                     _results.append(result)
                     time.sleep(1.5)  # rate limiting 保護
 
-                # -- 步驟 3：處理外國案（GPSS API 驗證 + 各國專利資料庫直接連結） --
+                # -- 步驟 3：處理外國案（GPSS 驗證 + Google Patents PDF 下載） --
                 _gpss_user_code = "963bED2F36842DCD"
                 for idx, pat in enumerate(_foreign_numbers):
                     _num = pat["number"]
                     _country = pat["country"]
                     _pct = 0.05 + 0.85 * ((_total_tw + idx) / max(_total_steps, 1))
-                    _progress.progress(_pct, text=f"驗證 {_country} {_num}... ({idx+1}/{_total_foreign})")
+                    _progress.progress(_pct, text=f"處理 {_country} {_num}... ({idx+1}/{_total_foreign})")
 
                     # 判斷是否為 ZL 申請號（ZL 開頭 → 用 AN 查詢）
                     _is_zl = _num.upper().startswith("ZL") or (
@@ -2084,8 +2175,6 @@ elif _page == "📥 下載公開說明書":
                         _api_title = _verified["title"]
 
                     # 產生各國專利資料庫直接連結
-                    # 對非 ZL 案：用 API 回傳的精確號碼建連結
-                    # 對 ZL 案：傳入原始號碼 + API 查到的公告號
                     if _is_zl:
                         patent_links = _build_foreign_patent_links(
                             _country, _num, pub_number=_pub_number
@@ -2096,20 +2185,37 @@ elif _page == "📥 下載公開說明書":
                         )
                     else:
                         patent_links = _build_foreign_patent_links(_country, _num)
+
+                    # -- 嘗試從 Google Patents 自動下載 PDF --
+                    _gp_id = _build_google_patent_id(_country, _num, pub_number=_pub_number)
+                    _dl_status = "link"  # 預設只提供連結
+                    _dl_filename = ""
+                    _dl_error = ""
+                    if _gp_id:
+                        _progress.progress(_pct, text=f"下載 {_gp_id} PDF... ({idx+1}/{_total_foreign})")
+                        _pdf_data, _pdf_result = google_patents_download_pdf(_gp_id)
+                        if _pdf_data:
+                            _dl_status = "ok"
+                            _dl_filename = _pdf_result  # filename
+                            _downloaded_files[_dl_filename] = _pdf_data
+                        else:
+                            _dl_error = _pdf_result  # error message
+
                     _results.append({
                         "number": _num,
                         "country": _country,
                         "raw": pat["raw"],
-                        "status": "link",
-                        "filename": "",
-                        "data": None,
-                        "error": "",
+                        "status": _dl_status,
+                        "filename": _dl_filename,
+                        "data": None,  # 不重複存（已在 _downloaded_files）
+                        "error": _dl_error,
                         "patent_links": patent_links,
                         "gpss_link": patent_links[0]["url"] if patent_links else "",
                         "verified": _verified["found"],
                         "api_doc_number": _verified.get("doc_number", ""),
                         "api_title": _api_title,
                     })
+                    time.sleep(1)  # rate limiting
 
                 _progress.progress(1.0, text="完成！")
 
@@ -2134,7 +2240,7 @@ elif _page == "📥 下載公開說明書":
             with _res_cols[0]:
                 st.metric("✅ 已下載", f"{len(_ok)} 筆")
             with _res_cols[1]:
-                st.metric("🔗 外國案連結", f"{len(_links)} 筆")
+                st.metric("🔗 僅連結", f"{len(_links)} 筆")
             with _res_cols[2]:
                 st.metric("⚠️ 未找到", f"{len(_not_found)} 筆")
             with _res_cols[3]:
@@ -2144,23 +2250,34 @@ elif _page == "📥 下載公開說明書":
             if _ok:
                 with st.expander(f"✅ 已下載（{len(_ok)} 筆）", expanded=True):
                     for r in _ok:
-                        st.markdown(f"- **{r['raw']}** → `{r['filename']}`")
+                        _title_str = ""
+                        if r.get("api_title"):
+                            _title_str = f" — {r['api_title'][:60]}"
+                        _pl = r.get("patent_links", [])
+                        if _pl:
+                            _link_parts = " ｜ ".join(
+                                f"[{lnk['source']}]({lnk['url']})" for lnk in _pl
+                            )
+                            st.markdown(f"- **{r['raw']}**{_title_str} → `{r['filename']}` ｜ {_link_parts}")
+                        else:
+                            st.markdown(f"- **{r['raw']}**{_title_str} → `{r['filename']}`")
 
             if _links:
-                with st.expander(f"🔗 外國案連結（{len(_links)} 筆）— 點擊前往各國專利資料庫", expanded=True):
+                with st.expander(f"🔗 外國案連結（{len(_links)} 筆）— 自動下載失敗，請手動前往", expanded=True):
                     for r in _links:
                         _pl = r.get("patent_links", [])
                         _badge = "✅" if r.get("verified") else "🔍"
                         _title_str = ""
                         if r.get("api_title"):
                             _title_str = f" — {r['api_title'][:60]}"
+                        _err_hint = f" ⚠️ _{r['error']}_" if r.get("error") else ""
                         if _pl:
                             _link_parts = " ｜ ".join(
                                 f"[{lnk['source']}]({lnk['url']})" for lnk in _pl
                             )
-                            st.markdown(f"- {_badge} **{r['country']} {r['number']}**{_title_str} → {_link_parts}")
+                            st.markdown(f"- {_badge} **{r['country']} {r['number']}**{_title_str} → {_link_parts}{_err_hint}")
                         else:
-                            st.markdown(f"- {_badge} **{r['country']} {r['number']}**{_title_str} → `{r['number']}`")
+                            st.markdown(f"- {_badge} **{r['country']} {r['number']}**{_title_str} → `{r['number']}`{_err_hint}")
 
             if _not_found:
                 with st.expander(f"⚠️ 未找到說明書（{len(_not_found)} 筆）", expanded=False):
