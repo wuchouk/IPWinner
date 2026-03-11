@@ -255,12 +255,10 @@ def _build_foreign_patent_links(country, number, pub_number=""):
             "source": "Google Patents",
             "url": f"https://patents.google.com/patent/US{clean_num}",
         })
-        # USPTO Patent Public Search（新版全文檢索系統，直接下載 PDF）
-        # 去除後綴（A1/B2 等）只保留數字部分
-        _us_num = re.sub(r'[A-Z]\d*$', '', clean_num, flags=re.IGNORECASE)
+        # Espacenet（備用來源，穩定可靠）
         links.append({
-            "source": "USPTO PDF",
-            "url": f"https://ppubs.uspto.gov/dirsearch-public/print/downloadPdf/{_us_num}",
+            "source": "Espacenet",
+            "url": f"https://worldwide.espacenet.com/patent/search?q=pn%3DUS{clean_num}",
         })
 
     elif country == "CN":
