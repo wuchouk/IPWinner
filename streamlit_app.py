@@ -212,8 +212,10 @@ def _build_foreign_patent_links(country, number):
     回傳 list of dict: [{"source": "來源名稱", "url": "連結"}]
     """
     links = []
-    # 清理號碼：去除國碼前綴，保留純數字（及可能的小數點）
+    # 清理號碼：去除國碼前綴（GPSS API 的 doc-number 可能帶有國碼如 "CN114431708A"）
     clean_num = number.strip()
+    if country and clean_num.upper().startswith(country.upper()):
+        clean_num = clean_num[len(country):]
 
     if country == "US":
         # Google Patents
