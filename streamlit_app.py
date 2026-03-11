@@ -1841,19 +1841,28 @@ elif _page == "📥 下載公開說明書":
     st.caption("若號碼未指定國碼，將預設為台灣案處理。若為外國案請加上國碼前綴（TW/US/CN/JP/EP/KR/WO）。中國授權專利可用 ZL 前綴。")
 
     # -- 查詢按鈕（第一步：解析） --
-    _can_query = (_input_method == "直接輸入" and st.session_state.get(f"patent_text_input_{_ik}", "").strip()) or \
-                 (_input_method == "上傳檔案" and st.session_state.get(f"patent_file_uploader_{_ik}") is not None)
-
-    if st.button("🔍 查詢", type="primary", use_container_width=True, key="btn_patent_query", disabled=not _can_query):
+    # 不用 disabled — Streamlit text_area 貼上文字後要失焦才寫入 session_state，
+    # 但按下按鈕時 Streamlit 會先 commit 所有 widget 值再執行 callback，所以改成按下後再檢查。
+    if st.button("🔍 查詢", type="primary", use_container_width=True, key="btn_patent_query"):
+        _has_input = False
         if _input_method == "直接輸入":
-            _parsed = parse_patent_numbers(st.session_state.get(f"patent_text_input_{_ik}", ""))
+            _txt = st.session_state.get(f"patent_text_input_{_ik}", "").strip()
+            if _txt:
+                _has_input = True
+                _parsed = parse_patent_numbers(_txt)
         else:
-            _parsed = parse_file_for_patent_numbers(st.session_state.get(f"patent_file_uploader_{_ik}"))
-        st.session_state.patent_parsed = _parsed
-        # 清除之前的下載結果
-        for _k in ['patent_download_done', 'patent_results', 'patent_files']:
-            st.session_state.pop(_k, None)
-        st.rerun()
+            _file = st.session_state.get(f"patent_file_uploader_{_ik}")
+            if _file is not None:
+                _has_input = True
+                _parsed = parse_file_for_patent_numbers(_file)
+        if _has_input:
+            st.session_state.patent_parsed = _parsed
+            # 清除之前的下載結果
+            for _k in ['patent_download_done', 'patent_results', 'patent_files']:
+                st.session_state.pop(_k, None)
+            st.rerun()
+        else:
+            st.warning("請先輸入專利號碼或上傳檔案。")
 
     # -- 解析結果顯示（點了查詢按鈕之後才顯示） --
     _patent_numbers_raw = st.session_state.get("patent_parsed", [])
