@@ -250,15 +250,10 @@ def _build_foreign_patent_links(country, number, pub_number=""):
         _pub = _pub[len(country):]
 
     if country == "US":
-        # Google Patents（主要來源，有 Download PDF 按鈕）
+        # Google Patents（有 Download PDF 按鈕，US 專利最穩定的來源）
         links.append({
             "source": "Google Patents",
             "url": f"https://patents.google.com/patent/US{clean_num}",
-        })
-        # Espacenet（備用來源，穩定可靠）
-        links.append({
-            "source": "Espacenet",
-            "url": f"https://worldwide.espacenet.com/patent/search?q=pn%3DUS{clean_num}",
         })
 
     elif country == "CN":
