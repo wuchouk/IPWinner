@@ -158,6 +158,105 @@ def gpss_search(user_code, patent_number, pat_db=None):
 
 
 # ============================================================
+# 外國案直接連結產生模組
+# ============================================================
+
+def _build_foreign_patent_links(country, number):
+    """
+    根據國家碼和專利號產生各國專利資料庫的直接連結。
+    回傳 list of dict: [{"source": "來源名稱", "url": "連結"}]
+    """
+    links = []
+    # 清理號碼：去除國碼前綴，保留純數字（及可能的小數點）
+    clean_num = number.strip()
+
+    if country == "US":
+        # Google Patents
+        links.append({
+            "source": "Google Patents",
+            "url": f"https://patents.google.com/patent/US{clean_num}",
+        })
+        # USPTO Full-Text (application)
+        # 格式判斷：如果是 7 位以上純數字 → 授權號；如果含 "/" 或以 "20" 開頭 → 申請號
+        digits_only = clean_num.replace(",", "").replace(" ", "")
+        if "/" in clean_num:
+            # 申請號格式 e.g. 16/123,456
+            links.append({
+                "source": "USPTO",
+                "url": f"https://patft.uspto.gov/netacgi/nph-Parser?Sect1=PTO1&Sect2=HITOFF&p=1&u=/netahtml/PTO/srchnum.htm&r=1&f=G&l=50&d=PALL&s1={clean_num}.PN.",
+            })
+        else:
+            links.append({
+                "source": "USPTO",
+                "url": f"https://patft.uspto.gov/netacgi/nph-Parser?Sect1=PTO1&Sect2=HITOFF&p=1&u=/netahtml/PTO/srchnum.htm&r=1&f=G&l=50&d=PALL&s1={digits_only}.PN.",
+            })
+
+    elif country == "CN":
+        # Google Patents（最穩定的中國專利 PDF 來源）
+        links.append({
+            "source": "Google Patents",
+            "url": f"https://patents.google.com/patent/CN{clean_num}",
+        })
+
+    elif country == "JP":
+        # Google Patents
+        links.append({
+            "source": "Google Patents",
+            "url": f"https://patents.google.com/patent/JP{clean_num}",
+        })
+        # J-PlatPat
+        links.append({
+            "source": "J-PlatPat",
+            "url": f"https://www.j-platpat.inpit.go.jp/c1801/PU/JP-{clean_num}/11/ja",
+        })
+
+    elif country == "EP":
+        # Espacenet（歐洲專利局，可直接看 PDF）
+        links.append({
+            "source": "Espacenet",
+            "url": f"https://worldwide.espacenet.com/patent/search?q=pn%3DEP{clean_num}",
+        })
+        # Google Patents
+        links.append({
+            "source": "Google Patents",
+            "url": f"https://patents.google.com/patent/EP{clean_num}",
+        })
+
+    elif country == "KR":
+        # Google Patents
+        links.append({
+            "source": "Google Patents",
+            "url": f"https://patents.google.com/patent/KR{clean_num}",
+        })
+        # KIPRIS（韓國智慧財產局）
+        links.append({
+            "source": "KIPRIS",
+            "url": f"https://kpat.kipris.or.kr/kpat/searchLogina.do?next=MainSearch&lng=en",
+        })
+
+    elif country == "WO":
+        # Google Patents
+        links.append({
+            "source": "Google Patents",
+            "url": f"https://patents.google.com/patent/WO{clean_num}",
+        })
+        # WIPO PATENTSCOPE
+        links.append({
+            "source": "PATENTSCOPE",
+            "url": f"https://patentscope.wipo.int/search/en/detail.jsf?docId=WO{clean_num}",
+        })
+
+    else:
+        # 其他國家：fallback 到 Google Patents
+        links.append({
+            "source": "Google Patents",
+            "url": f"https://patents.google.com/patent/{country}{clean_num}",
+        })
+
+    return links
+
+
+# ============================================================
 # 專利號碼解析模組
 # ============================================================
 # 各國專利號碼格式（帶國碼前綴）
@@ -1733,7 +1832,7 @@ elif _page == "📥 下載公開說明書":
                     st.text(f"  {p['raw']}")
 
         if _foreign_numbers:
-            with st.expander(f"🌍 外國專利（{len(_foreign_numbers)} 筆）— 產生 GPSS 連結", expanded=True):
+            with st.expander(f"🌍 外國專利（{len(_foreign_numbers)} 筆）— 產生各國資料庫連結", expanded=True):
                 for p in _foreign_numbers:
                     st.text(f"  {p['country']} {p['number']}")
 
@@ -1872,16 +1971,15 @@ elif _page == "📥 下載公開說明書":
                     _results.append(result)
                     time.sleep(1.5)  # rate limiting 保護
 
-                # -- 步驟 3：處理外國案（產生 GPSS 連結） --
+                # -- 步驟 3：處理外國案（產生各國專利資料庫直接連結） --
                 for idx, pat in enumerate(_foreign_numbers):
                     _num = pat["number"]
                     _country = pat["country"]
                     _pct = 0.05 + 0.85 * ((_total_tw + idx) / max(_total_steps, 1))
                     _progress.progress(_pct, text=f"產生 {_country} {_num} 連結... ({idx+1}/{_total_foreign})")
 
-                    # 產生 GPSS 查詢連結（GPSS 使用 session-based URL，無法直接帶入搜尋條件，
-                    # 因此連結至首頁，使用者需手動貼上專利號查詢）
-                    gpss_link = "https://tiponet.tipo.gov.tw/gpss2/gpsskmc/gpssbkm"
+                    # 產生各國專利資料庫直接連結
+                    patent_links = _build_foreign_patent_links(_country, _num)
                     _results.append({
                         "number": _num,
                         "country": _country,
@@ -1890,7 +1988,8 @@ elif _page == "📥 下載公開說明書":
                         "filename": "",
                         "data": None,
                         "error": "",
-                        "gpss_link": gpss_link,
+                        "patent_links": patent_links,
+                        "gpss_link": patent_links[0]["url"] if patent_links else "",
                     })
 
                 _progress.progress(1.0, text="完成！")
@@ -1916,7 +2015,7 @@ elif _page == "📥 下載公開說明書":
             with _res_cols[0]:
                 st.metric("✅ 已下載", f"{len(_ok)} 筆")
             with _res_cols[1]:
-                st.metric("🔗 GPSS 連結", f"{len(_links)} 筆")
+                st.metric("🔗 外國案連結", f"{len(_links)} 筆")
             with _res_cols[2]:
                 st.metric("⚠️ 未找到", f"{len(_not_found)} 筆")
             with _res_cols[3]:
@@ -1929,9 +2028,16 @@ elif _page == "📥 下載公開說明書":
                         st.markdown(f"- **{r['raw']}** → `{r['filename']}`")
 
             if _links:
-                with st.expander(f"🔗 GPSS 連結（{len(_links)} 筆）— 請手動前往下載", expanded=True):
+                with st.expander(f"🔗 外國案連結（{len(_links)} 筆）— 點擊前往各國專利資料庫", expanded=True):
                     for r in _links:
-                        st.markdown(f"- **{r['country']} {r['number']}** → `{r['number']}` [前往 GPSS 查詢]({r['gpss_link']})")
+                        _pl = r.get("patent_links", [])
+                        if _pl:
+                            _link_parts = " ｜ ".join(
+                                f"[{lnk['source']}]({lnk['url']})" for lnk in _pl
+                            )
+                            st.markdown(f"- **{r['country']} {r['number']}** → {_link_parts}")
+                        else:
+                            st.markdown(f"- **{r['country']} {r['number']}** → `{r['number']}`")
 
             if _not_found:
                 with st.expander(f"⚠️ 未找到說明書（{len(_not_found)} 筆）", expanded=False):
@@ -1979,7 +2085,7 @@ elif _page == "📥 下載公開說明書":
         st.divider()
         st.subheader("📜 查詢歷史")
         for _hi, _entry in enumerate(_history):
-            _label = f"{_entry['timestamp']}（共 {_entry['total']} 筆：{_entry['ok_count']} 已下載 / {_entry['link_count']} GPSS 連結）"
+            _label = f"{_entry['timestamp']}（共 {_entry['total']} 筆：{_entry['ok_count']} 已下載 / {_entry['link_count']} 外國案連結）"
             with st.expander(_label, expanded=False):
                 _h_results = _entry['results']
                 _h_files = _entry['files']
@@ -1995,9 +2101,15 @@ elif _page == "📥 下載公開說明書":
                         st.markdown(f"- {r['raw']} → `{r['filename']}`")
 
                 if _h_links:
-                    st.markdown("**🔗 GPSS 連結：**")
+                    st.markdown("**🔗 外國案連結：**")
                     for r in _h_links:
-                        st.markdown(f"- {r['country']} {r['number']} → [前往 GPSS 查詢]({r['gpss_link']})")
+                        _pl = r.get("patent_links", [])
+                        if _pl:
+                            _lp = " ｜ ".join(f"[{lnk['source']}]({lnk['url']})" for lnk in _pl)
+                            st.markdown(f"- {r['country']} {r['number']} → {_lp}")
+                        else:
+                            # 相容舊資料（只有 gpss_link）
+                            st.markdown(f"- {r['country']} {r['number']} → [查詢]({r.get('gpss_link', '')})")
 
                 if _h_not_found:
                     st.markdown("**⚠️ 未找到：**")
