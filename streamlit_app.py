@@ -253,6 +253,12 @@ def _build_foreign_patent_links(country, number):
             "url": f"https://patents.google.com/patent/{country}{clean_num}",
         })
 
+    # 所有外國案都附上 GPSS 作為備用來源
+    links.append({
+        "source": "GPSS",
+        "url": "https://tiponet.tipo.gov.tw/gpss2/gpsskmc/gpssbkm",
+    })
+
     return links
 
 
