@@ -161,11 +161,32 @@ def gpss_search(user_code, patent_number, pat_db=None, exp_fld=None):
         return None
 
 
-def gpss_verify_patent(user_code, country, number):
+def _parse_gpss_response(data):
+    """解析 GPSS API JSON 回應，取出第一筆專利的公告號和名稱。"""
+    try:
+        patent_node = data.get("gpss-API", {}).get("patent", {})
+        contents = patent_node.get("patentcontent", [])
+        if isinstance(contents, dict):
+            contents = [contents]
+        if not contents:
+            return None, None
+        pc = contents[0]
+        pub_ref = pc.get("publication-reference", {})
+        doc_num = pub_ref.get("doc-number", "")
+        title_node = pc.get("patent-title", "")
+        if isinstance(title_node, dict):
+            title_node = title_node.get("#text", "")
+        return doc_num, title_node
+    except Exception:
+        return None, None
+
+
+def gpss_verify_patent(user_code, country, number, search_by_an=False):
     """
     用 GPSS API 驗證專利是否存在，並回傳 API 提供的精確公告號碼。
     回傳 dict: {"found": bool, "doc_number": str, "title": str, "db": str}
-    精確的 doc_number 可用來建構更準確的 Google Patents URL。
+
+    search_by_an=True 時，用 AN（申請號）查詢，適用於 ZL 開頭的中國授權專利。
     """
     result = {"found": False, "doc_number": "", "title": "", "db": ""}
     dbs = _COUNTRY_DB_MAP.get(country, [])
@@ -173,31 +194,29 @@ def gpss_verify_patent(user_code, country, number):
         return result
 
     for db in dbs:
-        data = gpss_search(user_code, number, pat_db=db)
+        if search_by_an:
+            # ZL 號碼是申請號 → 用 AN 查詢
+            params = f"userCode={user_code}&patDB={db}&AN={number}"
+            params += "&expFld=PN,ID,AN,AD,TI,PA,IN&expFmt=json&expQty=5"
+            url = f"{_GPSS_API_BASE}?{params}"
+            req = urllib.request.Request(url)
+            req.add_header("User-Agent", "Mozilla/5.0")
+            try:
+                with urllib.request.urlopen(req, timeout=30, context=_SSL_CTX) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+            except Exception:
+                continue
+        else:
+            data = gpss_search(user_code, number, pat_db=db)
         if not data:
             continue
-        try:
-            # 解析 JSON 結構：gpss-API.patent.patentcontent[]
-            patent_node = data.get("gpss-API", {}).get("patent", {})
-            contents = patent_node.get("patentcontent", [])
-            if isinstance(contents, dict):
-                contents = [contents]
-            if not contents:
-                continue
-            pc = contents[0]
-            pub_ref = pc.get("publication-reference", {})
-            doc_num = pub_ref.get("doc-number", "")
-            title_node = pc.get("patent-title", "")
-            if isinstance(title_node, dict):
-                title_node = title_node.get("#text", "")
-            if doc_num:
-                result["found"] = True
-                result["doc_number"] = doc_num
-                result["title"] = title_node
-                result["db"] = db
-                return result
-        except Exception:
-            continue
+        doc_num, title = _parse_gpss_response(data)
+        if doc_num:
+            result["found"] = True
+            result["doc_number"] = doc_num
+            result["title"] = title or ""
+            result["db"] = db
+            return result
 
     return result
 
@@ -206,10 +225,12 @@ def gpss_verify_patent(user_code, country, number):
 # 外國案直接連結產生模組
 # ============================================================
 
-def _build_foreign_patent_links(country, number):
+def _build_foreign_patent_links(country, number, pub_number=""):
     """
     根據國家碼和專利號產生各國專利資料庫的直接連結。
     回傳 list of dict: [{"source": "來源名稱", "url": "連結"}]
+
+    pub_number: GPSS API 回傳的公告號（如 CN105640659A），用於 ZL 申請號 → 公告號對應。
     """
     links = []
     # 清理號碼：去除國碼前綴（GPSS API 的 doc-number 可能帶有國碼如 "CN114431708A"）
@@ -223,6 +244,10 @@ def _build_foreign_patent_links(country, number):
         clean_num = clean_num[2:]  # 去掉 "ZL"
     # 去掉校驗碼小數點（如 .7, .X）— 適用於 CN 申請號
     _cn_app_num = re.sub(r'\.\w$', '', clean_num) if country == "CN" else clean_num
+    # 清理 pub_number 的國碼前綴（GPSS 回傳可能帶國碼）
+    _pub = pub_number.strip()
+    if country and _pub.upper().startswith(country.upper()):
+        _pub = _pub[len(country):]
 
     if country == "US":
         # Google Patents（主要來源，有 Download PDF 按鈕）
@@ -239,16 +264,22 @@ def _build_foreign_patent_links(country, number):
         })
 
     elif country == "CN":
-        if _is_zl:
-            # ZL 授權號 → 用申請號查 Google Patents（去掉校驗碼）
+        if _is_zl and _pub:
+            # ZL 申請號 + GPSS 查到公告號 → 用公告號建精確連結
             links.append({
                 "source": "Google Patents",
-                "url": f"https://patents.google.com/patent/CN{_cn_app_num}",
+                "url": f"https://patents.google.com/patent/CN{_pub}",
             })
-            # Espacenet 用申請號查（比 Google Patents 更能處理申請號格式）
+        elif _is_zl:
+            # ZL 申請號但 GPSS 沒查到 → 用 Google Patents 搜尋功能 fallback
+            links.append({
+                "source": "Google Patents（搜尋）",
+                "url": f"https://patents.google.com/?q={_cn_app_num}&country=CN",
+            })
+            # Espacenet 可接受申請號查詢
             links.append({
                 "source": "Espacenet",
-                "url": f"https://worldwide.espacenet.com/patent/search?q=pn%3DCN{_cn_app_num}",
+                "url": f"https://worldwide.espacenet.com/patent/search?q={_cn_app_num}",
             })
         else:
             # 公開號 / 公告號 → 直接用
@@ -2038,17 +2069,40 @@ elif _page == "📥 下載公開說明書":
                     _pct = 0.05 + 0.85 * ((_total_tw + idx) / max(_total_steps, 1))
                     _progress.progress(_pct, text=f"驗證 {_country} {_num}... ({idx+1}/{_total_foreign})")
 
-                    # 用 GPSS API 驗證專利並取得精確的 doc-number
-                    _verified = gpss_verify_patent(_gpss_user_code, _country, _num)
-                    # 如果 API 回傳了精確號碼，用它來產生更準確的連結
-                    _link_num = _num
+                    # 判斷是否為 ZL 申請號（ZL 開頭 → 用 AN 查詢）
+                    _is_zl = _num.upper().startswith("ZL") or (
+                        _country == "CN" and "ZL" in _num.upper()
+                    )
+                    if _is_zl:
+                        # ZL 號碼 → 用 AN（申請號）查 GPSS，取得公告號
+                        _an_num = re.sub(r'^ZL', '', _num, flags=re.IGNORECASE)
+                        _an_num = re.sub(r'\.\w$', '', _an_num)  # 去校驗碼
+                        _verified = gpss_verify_patent(
+                            _gpss_user_code, _country, _an_num, search_by_an=True
+                        )
+                    else:
+                        # 一般公告號 / 公開號 → 用 PN 查
+                        _verified = gpss_verify_patent(_gpss_user_code, _country, _num)
+
                     _api_title = ""
+                    _pub_number = ""
                     if _verified["found"] and _verified["doc_number"]:
-                        _link_num = _verified["doc_number"]
+                        _pub_number = _verified["doc_number"]
                         _api_title = _verified["title"]
 
                     # 產生各國專利資料庫直接連結
-                    patent_links = _build_foreign_patent_links(_country, _link_num)
+                    # 對非 ZL 案：用 API 回傳的精確號碼建連結
+                    # 對 ZL 案：傳入原始號碼 + API 查到的公告號
+                    if _is_zl:
+                        patent_links = _build_foreign_patent_links(
+                            _country, _num, pub_number=_pub_number
+                        )
+                    elif _pub_number:
+                        patent_links = _build_foreign_patent_links(
+                            _country, _pub_number
+                        )
+                    else:
+                        patent_links = _build_foreign_patent_links(_country, _num)
                     _results.append({
                         "number": _num,
                         "country": _country,
