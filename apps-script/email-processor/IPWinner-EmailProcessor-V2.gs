@@ -2,10 +2,15 @@
 // IP Winner Email Auto-Processor V2
 // Google Apps Script — 每日自動下載並歸檔信件
 //
-// 版本: v2.1.0
+// 版本: v2.2.0
 // 更新日期: 2026-03-12
 //
 // --- CHANGELOG ---
+// v2.2.0 (2026-03-12)
+//   - 修正 searchThreads() 分頁搜尋：突破 Gmail API 500 thread 上限
+//     改用 GmailApp.search(query, start, batchSize) 分頁取得所有結果
+//   - 新增 debugThreadOrder() 追蹤搜尋排序與處理範圍
+//
 // v2.1.0 (2026-03-12)
 //   - 修正 shouldSkip() 對回覆信的誤判：加入 stripQuotedText()
 //     在比對 template 前先移除引用文字
@@ -618,7 +623,26 @@ function searchThreads() {
   var query = '(from:' + CONFIG.TARGET_EMAIL + ' OR to:' + CONFIG.TARGET_EMAIL + ') after:' + afterDate;
   Logger.log('搜尋條件: ' + query);
 
-  return GmailApp.search(query);
+  // 分頁搜尋：GmailApp.search() 單次最多回傳 500 threads
+  // 持續分頁直到撈完所有結果，確保不遺漏任何信件
+  var allThreads = [];
+  var batchSize = 500;
+  var start = 0;
+
+  while (true) {
+    var batch = GmailApp.search(query, start, batchSize);
+    Logger.log('分頁: 從 #' + start + ' 取得 ' + batch.length + ' 個 threads');
+    for (var i = 0; i < batch.length; i++) {
+      allThreads.push(batch[i]);
+    }
+    if (batch.length < batchSize) {
+      break;  // 沒有更多結果了
+    }
+    start += batchSize;
+  }
+
+  Logger.log('搜尋完成，共 ' + allThreads.length + ' 個 threads');
+  return allThreads;
 }
 
 /**
@@ -1024,9 +1048,7 @@ function debugMissingEmails() {
 function debugSpecificEmails() {
   // --- 要追蹤的關鍵字（每封信一個） ---
   var keywords = [
-    'KOIS22001BID1',
-    'Visit your office in October',
-    'KOIS23004WWW1'
+    'KOIT23001TSA2'
   ];
 
   // 載入已處理紀錄
@@ -1135,5 +1157,94 @@ function debugTemplate() {
     }
   } else {
     Logger.log('找不到該信件');
+  }
+}
+
+// ==================== Debug: 確認 thread 排序與處理範圍 ====================
+function debugThreadOrder() {
+  // 用跟主程式完全一樣的搜尋邏輯
+  var hoursAgo = new Date();
+  hoursAgo.setHours(hoursAgo.getHours() - CONFIG.SEARCH_HOURS);
+  var afterDate = formatDateForSearch(hoursAgo);
+  var query = '(from:' + CONFIG.TARGET_EMAIL + ' OR to:' + CONFIG.TARGET_EMAIL + ') after:' + afterDate;
+  Logger.log('搜尋條件: ' + query);
+
+  var threads = searchThreads();  // 用主程式的分頁搜尋
+  Logger.log('搜尋到 threads 總數: ' + threads.length);
+
+  // 跟主程式一樣排序
+  threads.sort(function(a, b) {
+    return b.getLastMessageDate().getTime() - a.getLastMessageDate().getTime();
+  });
+  Logger.log('已排序（最新優先）');
+
+  // 載入已處理紀錄
+  var ssId = '149JSnTtEpQyK4Qy_RJnBNIUywJ7A5WwXxVATIj4V3po';
+  var ss = SpreadsheetApp.openById(ssId);
+  var processedSheet = ss.getSheetByName(CONFIG.PROCESSED_SHEET_NAME);
+  var processedData = processedSheet.getDataRange().getValues();
+  var processedIds = {};
+  for (var i = 1; i < processedData.length; i++) {
+    processedIds[processedData[i][0]] = true;
+  }
+
+  // 模擬跟 processEmailsWithLimit(100) 一樣的計數邏輯
+  var maxMessages = 100;
+  var newCount = 0;
+  var skippedCount = 0;
+  var targetFound = false;
+
+  Logger.log('\n=== 前 200 個 Threads 摘要（含排序順序） ===');
+  for (var t = 0; t < Math.min(threads.length, 200); t++) {
+    var thread = threads[t];
+    var msgs = thread.getMessages();
+    var lastDate = thread.getLastMessageDate();
+    var subject = thread.getFirstMessageSubject();
+
+    // 計算這個 thread 裡有幾封是新的
+    var newInThread = 0;
+    var totalInThread = msgs.length;
+    var containsTarget = false;
+    for (var m = 0; m < msgs.length; m++) {
+      var msgId = msgs[m].getId();
+      if (!processedIds[msgId]) {
+        newInThread++;
+      }
+      // 檢查是否包含目標信件
+      if (msgs[m].getSubject().indexOf('KOIT23001TSA2') !== -1) {
+        containsTarget = true;
+      }
+    }
+
+    var marker = containsTarget ? ' ★★★ TARGET' : '';
+    var wouldProcess = (newCount < maxMessages);
+
+    Logger.log('#' + t + ' | ' + Utilities.formatDate(lastDate, 'Asia/Taipei', 'MM/dd HH:mm') +
+               ' | new:' + newInThread + '/' + totalInThread +
+               ' | cumulative:' + newCount +
+               ' | ' + (wouldProcess ? 'WOULD PROCESS' : 'OUT OF LIMIT') +
+               marker +
+               ' | ' + subject.substring(0, 60));
+
+    // 模擬計數
+    newCount += newInThread;
+    skippedCount += (totalInThread - newInThread);
+
+    if (containsTarget) {
+      targetFound = true;
+      Logger.log('  ^^^ 目標信件在第 ' + t + ' 個 thread，此時累計新信件: ' + newCount);
+    }
+  }
+
+  Logger.log('\n=== 統計 ===');
+  Logger.log('搜尋到 threads: ' + threads.length);
+  Logger.log('前 200 threads 中新信件總數: ' + newCount);
+  Logger.log('前 200 threads 中已處理信件: ' + skippedCount);
+  Logger.log('目標信件 (KOIT23001TSA2): ' + (targetFound ? '找到 ✅' : '未找到 ❌'));
+  if (!targetFound) {
+    Logger.log('⚠️ 目標信件不在搜尋結果中！可能原因：');
+    Logger.log('  1. 該信件超過 ' + CONFIG.SEARCH_HOURS + ' 小時前');
+    Logger.log('  2. 搜尋條件沒有匹配到該 thread');
+    Logger.log('  3. 該信件在第 200 個 thread 之後');
   }
 }
