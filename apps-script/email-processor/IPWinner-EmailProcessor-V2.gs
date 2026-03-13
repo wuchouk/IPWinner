@@ -7,10 +7,11 @@
 //
 // --- CHANGELOG ---
 // v2.3.0 (2026-03-12)
-//   - 智慧過濾 inline 簽名圖片：分析 HTML 結構判斷圖片是否在正文
-//     若正文無 inline 圖片 → 跳過所有 inline（簽名 logo）
-//     若正文有 inline 圖片 → 保留全部（避免誤殺截圖）
+//   - 過濾 inline 簽名圖片：使用 includeInlineImages:false
+//     過濾所有 inline 圖片（簽名 logo），只保留真正附件（PDF 等）
+//     正文截圖仍完整保留於 .eml 檔中
 //   - CLEANUP_DAYS 從 30 天縮短為 7 天，加速已處理 ID 查詢
+//   - 新增 debugInlineFilter() 追蹤附件過濾行為
 //
 // v2.2.0 (2026-03-12)
 //   - 修正 searchThreads() 分頁搜尋：突破 Gmail API 500 thread 上限
@@ -291,56 +292,20 @@ function processSingleMessage(message, templates, folders, dedupMap, labels) {
 }
 
 /**
- * 智慧取得附件：根據 HTML 結構判斷是否過濾 inline 圖片
+ * 取得附件：過濾 inline 簽名圖片
  *
- * 策略：
- * 1. 取得 HTML body，找到 gmail_quote / gmail_signature 的位置
- * 2. 檢查「主文區域」（這些標記之前）有沒有 cid: 圖片引用
- * 3. 如果主文有 cid: → 表示寄件者在正文貼了截圖，保留所有附件
- * 4. 如果主文沒有 cid: → 所有 inline 圖片都是簽名 logo，用 includeInlineImages:false 過濾
+ * 使用 includeInlineImages: false 過濾所有 inline 圖片（簽名 logo）。
+ * 真正的附件（PDF、文件等）使用 Content-Disposition: attachment，不受影響。
+ * 若客戶在正文中貼了截圖，該截圖雖不會被獨立下載，但 .eml 檔內仍完整保留。
  */
 function getSmartAttachments(message) {
-  var htmlBody = message.getBody();  // 取得 HTML 內容
-
-  if (hasBodyInlineImages(htmlBody)) {
-    // 主文有 inline 圖片（可能是截圖）→ 保留全部
-    Logger.log('附件策略: 主文含 inline 圖片，保留全部附件');
-    return message.getAttachments();
-  } else {
-    // 主文沒有 inline 圖片 → 過濾掉簽名 logo
-    var allAtts = message.getAttachments();
-    var filteredAtts = message.getAttachments({includeInlineImages: false});
-    var skipped = allAtts.length - filteredAtts.length;
-    if (skipped > 0) {
-      Logger.log('附件策略: 過濾 ' + skipped + ' 個 inline 簽名圖片（保留 ' + filteredAtts.length + ' 個真正附件）');
-    }
-    return filteredAtts;
+  var allAtts = message.getAttachments();
+  var filteredAtts = message.getAttachments({includeInlineImages: false});
+  var skipped = allAtts.length - filteredAtts.length;
+  if (skipped > 0) {
+    Logger.log('附件策略: 過濾 ' + skipped + ' 個 inline 簽名圖片（保留 ' + filteredAtts.length + ' 個真正附件）');
   }
-}
-
-/**
- * 檢查 HTML body 的「主文區域」是否有 inline 圖片引用（cid:）
- * 主文區域 = gmail_quote 和 gmail_signature 標記之前的內容
- */
-function hasBodyInlineImages(htmlBody) {
-  if (!htmlBody) return false;
-
-  var mainContent = htmlBody;
-
-  // 找到 gmail_quote 的位置（引用的舊信）
-  var quotePos = htmlBody.indexOf('gmail_quote');
-  if (quotePos > 0) {
-    mainContent = htmlBody.substring(0, quotePos);
-  }
-
-  // 再排除 gmail_signature（自己的簽名檔）
-  var sigPos = mainContent.indexOf('gmail_signature');
-  if (sigPos > 0) {
-    mainContent = mainContent.substring(0, sigPos);
-  }
-
-  // 檢查主文區域是否有 cid: 引用
-  return mainContent.indexOf('cid:') !== -1;
+  return filteredAtts;
 }
 
 /**
@@ -1306,4 +1271,82 @@ function debugThreadOrder() {
     Logger.log('  2. 搜尋條件沒有匹配到該 thread');
     Logger.log('  3. 該信件在第 200 個 thread 之後');
   }
+}
+
+// ==================== Debug: 測試 inline 圖片過濾邏輯 ====================
+function debugInlineFilter() {
+  var keyword = 'KOIS22001TBD3';  // ← 改成你要測試的案號
+  Logger.log('========== Inline 圖片過濾 Debug ==========');
+  Logger.log('搜尋關鍵字: ' + keyword);
+
+  var query = '(from:' + CONFIG.TARGET_EMAIL + ' OR to:' + CONFIG.TARGET_EMAIL + ') subject:(' + keyword + ')';
+  var threads = GmailApp.search(query, 0, 10);
+  Logger.log('找到 threads: ' + threads.length);
+
+  for (var t = 0; t < threads.length; t++) {
+    var msgs = threads[t].getMessages();
+    Logger.log('\n--- Thread ' + t + ' (共 ' + msgs.length + ' 封) ---');
+
+    for (var m = 0; m < msgs.length; m++) {
+      var msg = msgs[m];
+      var subject = msg.getSubject();
+      Logger.log('\n  [Msg ' + m + '] ' + subject.substring(0, 80));
+
+      // 1. 取得 HTML body
+      var htmlBody = msg.getBody();
+      Logger.log('  HTML body 長度: ' + htmlBody.length);
+
+      // 2. 檢查各種標記的位置
+      var gmailQuotePos = htmlBody.indexOf('gmail_quote');
+      var gmailSigPos = htmlBody.indexOf('gmail_signature');
+      Logger.log('  gmail_quote 位置: ' + (gmailQuotePos === -1 ? '不存在' : gmailQuotePos));
+      Logger.log('  gmail_signature 位置: ' + (gmailSigPos === -1 ? '不存在' : gmailSigPos));
+
+      // 3. 取出主文區域
+      var mainContent = htmlBody;
+      if (gmailQuotePos > 0) {
+        mainContent = htmlBody.substring(0, gmailQuotePos);
+      }
+      if (mainContent.indexOf('gmail_signature') > 0) {
+        mainContent = mainContent.substring(0, mainContent.indexOf('gmail_signature'));
+      }
+      Logger.log('  主文區域長度: ' + mainContent.length);
+
+      // 4. 搜尋主文中的 cid: 引用
+      var cidMatches = mainContent.match(/cid:/gi);
+      var cidCount = cidMatches ? cidMatches.length : 0;
+      Logger.log('  主文中 cid: 引用數: ' + cidCount);
+
+      // 5. hasBodyInlineImages() 的結果
+      var hasBody = hasBodyInlineImages(htmlBody);
+      Logger.log('  hasBodyInlineImages() 結果: ' + hasBody);
+
+      // 6. 比較兩種 getAttachments
+      var allAtts = msg.getAttachments();
+      var filteredAtts = msg.getAttachments({includeInlineImages: false});
+      Logger.log('  getAttachments() 全部: ' + allAtts.length + ' 個');
+      Logger.log('  getAttachments({includeInlineImages:false}): ' + filteredAtts.length + ' 個');
+      Logger.log('  → 會被過濾的 inline 圖片: ' + (allAtts.length - filteredAtts.length) + ' 個');
+
+      // 7. 列出所有附件名稱和大小
+      for (var a = 0; a < allAtts.length; a++) {
+        var att = allAtts[a];
+        var isInFiltered = false;
+        for (var f = 0; f < filteredAtts.length; f++) {
+          if (filteredAtts[f].getName() === att.getName() && filteredAtts[f].getSize() === att.getSize()) {
+            isInFiltered = true;
+            break;
+          }
+        }
+        Logger.log('    ' + (a+1) + '. ' + att.getName() + ' (' + att.getSize() + ' bytes) ' +
+                   att.getContentType() + (isInFiltered ? ' ← 保留' : ' ← INLINE（會被過濾）'));
+      }
+
+      // 8. getSmartAttachments 的最終結果
+      var smartAtts = getSmartAttachments(msg);
+      Logger.log('  ★ getSmartAttachments() 最終結果: ' + smartAtts.length + ' 個');
+    }
+  }
+
+  Logger.log('\n========== Debug 結束 ==========');
 }
