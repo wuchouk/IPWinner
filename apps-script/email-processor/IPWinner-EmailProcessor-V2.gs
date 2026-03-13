@@ -2,10 +2,16 @@
 // IP Winner Email Auto-Processor V2
 // Google Apps Script — 每日自動下載並歸檔信件
 //
-// 版本: v2.2.0
+// 版本: v2.3.0
 // 更新日期: 2026-03-12
 //
 // --- CHANGELOG ---
+// v2.3.0 (2026-03-12)
+//   - 智慧過濾 inline 簽名圖片：分析 HTML 結構判斷圖片是否在正文
+//     若正文無 inline 圖片 → 跳過所有 inline（簽名 logo）
+//     若正文有 inline 圖片 → 保留全部（避免誤殺截圖）
+//   - CLEANUP_DAYS 從 30 天縮短為 7 天，加速已處理 ID 查詢
+//
 // v2.2.0 (2026-03-12)
 //   - 修正 searchThreads() 分頁搜尋：突破 Gmail API 500 thread 上限
 //     改用 GmailApp.search(query, start, batchSize) 分頁取得所有結果
@@ -41,7 +47,7 @@ var CONFIG = {
   UNCATEGORIZED_FOLDER_NAME: '未分類',
   CONFIG_SHEET_NAME: 'Email自動整理-設定檔',
   PROCESSED_SHEET_NAME: '已處理信件',
-  CLEANUP_DAYS: 30,  // 自動清理超過 N 天的已處理 ID
+  CLEANUP_DAYS: 7,   // 自動清理超過 N 天的已處理 ID
   // Gmail 標籤（僅供視覺辨識，不做去重）
   LABEL_PARENT: '已下載',
   LABEL_PATENT: '已下載/專利',
@@ -217,8 +223,8 @@ function processSingleMessage(message, templates, folders, dedupMap, labels) {
   // --- 取得信件原始內容 ---
   var rawContent = message.getRawContent();
 
-  // --- 取得附件 ---
-  var attachments = message.getAttachments();
+  // --- 取得附件（智慧過濾 inline 簽名圖片）---
+  var attachments = getSmartAttachments(message);
 
   // --- 如果沒有案號 → 存到未分類 ---
   if (caseNumbers.length === 0) {
@@ -282,6 +288,59 @@ function processSingleMessage(message, templates, folders, dedupMap, labels) {
   var catKeys = Object.keys(categories);
   if (catKeys.length > 1) return 'multi';
   return catKeys[0] || 'uncategorized';
+}
+
+/**
+ * 智慧取得附件：根據 HTML 結構判斷是否過濾 inline 圖片
+ *
+ * 策略：
+ * 1. 取得 HTML body，找到 gmail_quote / gmail_signature 的位置
+ * 2. 檢查「主文區域」（這些標記之前）有沒有 cid: 圖片引用
+ * 3. 如果主文有 cid: → 表示寄件者在正文貼了截圖，保留所有附件
+ * 4. 如果主文沒有 cid: → 所有 inline 圖片都是簽名 logo，用 includeInlineImages:false 過濾
+ */
+function getSmartAttachments(message) {
+  var htmlBody = message.getBody();  // 取得 HTML 內容
+
+  if (hasBodyInlineImages(htmlBody)) {
+    // 主文有 inline 圖片（可能是截圖）→ 保留全部
+    Logger.log('附件策略: 主文含 inline 圖片，保留全部附件');
+    return message.getAttachments();
+  } else {
+    // 主文沒有 inline 圖片 → 過濾掉簽名 logo
+    var allAtts = message.getAttachments();
+    var filteredAtts = message.getAttachments({includeInlineImages: false});
+    var skipped = allAtts.length - filteredAtts.length;
+    if (skipped > 0) {
+      Logger.log('附件策略: 過濾 ' + skipped + ' 個 inline 簽名圖片（保留 ' + filteredAtts.length + ' 個真正附件）');
+    }
+    return filteredAtts;
+  }
+}
+
+/**
+ * 檢查 HTML body 的「主文區域」是否有 inline 圖片引用（cid:）
+ * 主文區域 = gmail_quote 和 gmail_signature 標記之前的內容
+ */
+function hasBodyInlineImages(htmlBody) {
+  if (!htmlBody) return false;
+
+  var mainContent = htmlBody;
+
+  // 找到 gmail_quote 的位置（引用的舊信）
+  var quotePos = htmlBody.indexOf('gmail_quote');
+  if (quotePos > 0) {
+    mainContent = htmlBody.substring(0, quotePos);
+  }
+
+  // 再排除 gmail_signature（自己的簽名檔）
+  var sigPos = mainContent.indexOf('gmail_signature');
+  if (sigPos > 0) {
+    mainContent = mainContent.substring(0, sigPos);
+  }
+
+  // 檢查主文區域是否有 cid: 引用
+  return mainContent.indexOf('cid:') !== -1;
 }
 
 /**
