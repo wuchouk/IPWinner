@@ -2,10 +2,16 @@
 // IP Winner Email Auto-Processor V2
 // Google Apps Script — 每日自動下載並歸檔信件
 //
-// 版本: v2.3.0
+// 版本: v2.4.0
 // 更新日期: 2026-03-12
 //
 // --- CHANGELOG ---
+// v2.4.0 (2026-03-12)
+//   - 檔名移除時間，只保留日期 yyyyMMdd
+//   - 同檔名重複時自動在副檔名前加 (1), (2), (n)
+//     範例：20260312-TX-案號-主旨.eml → 20260312-TX-案號-主旨(1).eml
+//   - 附件檔名與 EML 同步（同前綴 + Attachment 序號）
+//
 // v2.3.0 (2026-03-12)
 //   - 混合策略過濾 inline 簽名圖片：
 //     Gmail 信件：偵測 gmail_quote/gmail_signature 主文邊界，保留正文截圖
@@ -218,8 +224,8 @@ function processSingleMessage(message, templates, folders, dedupMap, labels) {
   // --- 從主旨提取案號（可能多個）---
   var caseNumbers = extractCaseNumbers(subject);
 
-  // --- 日期時間戳 ---
-  var dateTimeStr = formatDateTime(date);
+  // --- 日期戳 ---
+  var dateStr = formatDateOnly(date);
 
   // --- 取得信件原始內容 ---
   var rawContent = message.getRawContent();
@@ -230,12 +236,14 @@ function processSingleMessage(message, templates, folders, dedupMap, labels) {
   // --- 如果沒有案號 → 存到未分類 ---
   if (caseNumbers.length === 0) {
     var cleanSubject = sanitizeFileName(subject);
-    var emlName = dateTimeStr + '-' + direction + '-未知案號-' + cleanSubject + '.eml';
+    var baseName = dateStr + '-' + direction + '-未知案號-' + cleanSubject;
+    var emlName = getUniqueFileName(folders.uncategorized, baseName, '.eml');
     folders.uncategorized.createFile(emlName, rawContent, 'message/rfc822');
     Logger.log('已儲存（未分類）: ' + emlName);
 
-    // 附件也存到未分類
-    saveAttachments(attachments, dateTimeStr, direction, '未知案號', cleanSubject, folders.uncategorized, dedupMap);
+    // 附件也存到未分類（用不含副檔名的部分當 prefix）
+    var emlPrefix = emlName.replace(/\.eml$/, '');
+    saveAttachments(attachments, emlPrefix, folders.uncategorized, dedupMap);
 
     // 加上 Gmail 標籤
     labels.uncategorized.addToThread(message.getThread());
@@ -269,14 +277,16 @@ function processSingleMessage(message, templates, folders, dedupMap, labels) {
 
     // 組合檔名
     var cleanSubject = sanitizeFileName(subject);
-    var emlName = dateTimeStr + '-' + direction + '-' + caseNum + '-' + cleanSubject + '.eml';
+    var baseName = dateStr + '-' + direction + '-' + caseNum + '-' + cleanSubject;
+    var emlName = getUniqueFileName(caseFolder, baseName, '.eml');
 
     // 儲存 .eml
     caseFolder.createFile(emlName, rawContent, 'message/rfc822');
     Logger.log('已儲存: ' + emlName + ' → ' + parentFolder.getName() + '/' + folderName);
 
-    // 儲存附件（含 inline 去重）
-    saveAttachments(attachments, dateTimeStr, direction, caseNum, cleanSubject, caseFolder, dedupMap);
+    // 儲存附件（含 inline 去重）— 用不含副檔名的部分當 prefix
+    var emlPrefix = emlName.replace(/\.eml$/, '');
+    saveAttachments(attachments, emlPrefix, caseFolder, dedupMap);
   }
 
   // 加上 Gmail 標籤（根據分類結果）
@@ -362,7 +372,7 @@ function hasBodyInlineImages(htmlBody) {
  * 儲存附件（含 inline 圖片去重）
  * dedupMap: 執行期間的全域去重 map，key 為 folderId_origName_size
  */
-function saveAttachments(attachments, dateTimeStr, direction, caseNum, cleanSubject, targetFolder, dedupMap) {
+function saveAttachments(attachments, emlPrefix, targetFolder, dedupMap) {
   if (!attachments || attachments.length === 0) return;
 
   var folderId = targetFolder.getId();
@@ -399,8 +409,8 @@ function saveAttachments(attachments, dateTimeStr, direction, caseNum, cleanSubj
       ext = attName.substring(dotIndex);  // 包含「.」
     }
 
-    // 組合附件檔名
-    var attachFileName = dateTimeStr + '-' + direction + '-' + caseNum + '-' + cleanSubject + '-Attachment' + count + ext;
+    // 組合附件檔名：跟 EML 同樣前綴 + Attachment序號
+    var attachFileName = emlPrefix + '-Attachment' + count + ext;
 
     targetFolder.createFile(att.copyBlob().setName(attachFileName));
     Logger.log('已儲存附件: ' + attachFileName);
@@ -720,10 +730,43 @@ function searchThreads() {
 }
 
 /**
- * 日期時間格式化：yyyymmdd_HHmm（使用台灣時區）
+ * 日期格式化：yyyyMMdd（使用台灣時區）
  */
-function formatDateTime(date) {
-  return Utilities.formatDate(date, 'Asia/Taipei', 'yyyyMMdd_HHmm');
+function formatDateOnly(date) {
+  return Utilities.formatDate(date, 'Asia/Taipei', 'yyyyMMdd');
+}
+
+/**
+ * 取得不重複的檔名
+ * 如果 baseName + ext 不存在 → 直接回傳
+ * 如果已存在 → 回傳 baseName(1) + ext, baseName(2) + ext, ...
+ *
+ * 範例：
+ *   getUniqueFileName(folder, '20260312-TX-KOIS22001TBD3-主旨', '.eml')
+ *   → '20260312-TX-KOIS22001TBD3-主旨.eml'       （第一封）
+ *   → '20260312-TX-KOIS22001TBD3-主旨(1).eml'     （第二封）
+ *   → '20260312-TX-KOIS22001TBD3-主旨(2).eml'     （第三封）
+ */
+function getUniqueFileName(targetFolder, baseName, ext) {
+  // 建立資料夾內現有檔名的 set（只掃一次）
+  var existingNames = {};
+  var files = targetFolder.getFiles();
+  while (files.hasNext()) {
+    existingNames[files.next().getName()] = true;
+  }
+
+  // 第一次嘗試：不加編號
+  var candidate = baseName + ext;
+  if (!existingNames[candidate]) return candidate;
+
+  // 已有同名檔案 → 加上 (1), (2), ...
+  for (var n = 1; n <= 999; n++) {
+    candidate = baseName + '(' + n + ')' + ext;
+    if (!existingNames[candidate]) return candidate;
+  }
+
+  // 極端情況：用時間戳避免衝突
+  return baseName + '(' + new Date().getTime() + ')' + ext;
 }
 
 /**
@@ -738,16 +781,17 @@ function formatDateForSearch(date) {
 
 /**
  * 清理檔名中不合法的字元
+ * Google Drive 只有 / 不能用，其餘 : * ? " 等都可以
+ * 只替換 / 和 \（避免路徑混淆）
  */
 function sanitizeFileName(name) {
   return name
     .replace(/^\[From:\s*[^\]]*\]\s*/gi, '')  // 去掉 Gmail 加的 [From: "xxx" <email>] 前綴
     .replace(/^收件匣\n?/g, '')                // 去掉「收件匣」前綴
-    // RE:/FW:/Fwd:/[EXTERNAL] 全部保留，不再移除
-    .replace(/[\/\\:*?"<>|]/g, '_')
+    .replace(/[\/\\]/g, '_')                   // 只替換 / 和 \（Google Drive 不允許的字元）
     .replace(/\s+/g, ' ')
     .trim()
-    .substring(0, 150);  // 限制主旨部分為 150 字元（前綴約 50 字元 + 150 + 副檔名 < 255）
+    .substring(0, 200);  // Google Drive 檔名限制寬鬆，200 字元足夠保留完整主旨
 }
 
 // ==================== Gmail 標籤 ====================
