@@ -7,9 +7,9 @@
 //
 // --- CHANGELOG ---
 // v2.3.0 (2026-03-12)
-//   - 過濾 inline 簽名圖片：使用 includeInlineImages:false
-//     過濾所有 inline 圖片（簽名 logo），只保留真正附件（PDF 等）
-//     正文截圖仍完整保留於 .eml 檔中
+//   - 混合策略過濾 inline 簽名圖片：
+//     Gmail 信件：偵測 gmail_quote/gmail_signature 主文邊界，保留正文截圖
+//     Outlook 等非 Gmail 信件：直接用 includeInlineImages:false 過濾
 //   - CLEANUP_DAYS 從 30 天縮短為 7 天，加速已處理 ID 查詢
 //   - 新增 debugInlineFilter() 追蹤附件過濾行為
 //
@@ -292,20 +292,70 @@ function processSingleMessage(message, templates, folders, dedupMap, labels) {
 }
 
 /**
- * 取得附件：過濾 inline 簽名圖片
+ * 智慧取得附件：混合策略過濾 inline 簽名圖片
  *
- * 使用 includeInlineImages: false 過濾所有 inline 圖片（簽名 logo）。
- * 真正的附件（PDF、文件等）使用 Content-Disposition: attachment，不受影響。
- * 若客戶在正文中貼了截圖，該截圖雖不會被獨立下載，但 .eml 檔內仍完整保留。
+ * 策略：
+ * 1. Gmail 信件（有 gmail_quote / gmail_signature 標記）：
+ *    分析 HTML 結構，若主文區域有 cid: 引用 → 保留全部（可能含截圖）
+ *    若主文區域無 cid: → 過濾所有 inline 圖片
+ * 2. Outlook 等非 Gmail 信件（無標記）：
+ *    無法判斷主文邊界，直接用 includeInlineImages:false 過濾
+ *    正文截圖仍完整保留於 .eml 檔中
  */
 function getSmartAttachments(message) {
-  var allAtts = message.getAttachments();
-  var filteredAtts = message.getAttachments({includeInlineImages: false});
-  var skipped = allAtts.length - filteredAtts.length;
-  if (skipped > 0) {
-    Logger.log('附件策略: 過濾 ' + skipped + ' 個 inline 簽名圖片（保留 ' + filteredAtts.length + ' 個真正附件）');
+  var htmlBody = message.getBody();
+  var hasGmailMarkers = htmlBody &&
+    (htmlBody.indexOf('gmail_quote') !== -1 || htmlBody.indexOf('gmail_signature') !== -1);
+
+  if (hasGmailMarkers) {
+    // Gmail 信件：用主文邊界偵測
+    if (hasBodyInlineImages(htmlBody)) {
+      Logger.log('附件策略 [Gmail]: 主文含 inline 圖片（可能是截圖），保留全部附件');
+      return message.getAttachments();
+    } else {
+      var allAtts = message.getAttachments();
+      var filteredAtts = message.getAttachments({includeInlineImages: false});
+      var skipped = allAtts.length - filteredAtts.length;
+      if (skipped > 0) {
+        Logger.log('附件策略 [Gmail]: 過濾 ' + skipped + ' 個 inline 簽名圖片（保留 ' + filteredAtts.length + ' 個真正附件）');
+      }
+      return filteredAtts;
+    }
+  } else {
+    // Outlook 等非 Gmail 信件：直接過濾 inline
+    var allAtts = message.getAttachments();
+    var filteredAtts = message.getAttachments({includeInlineImages: false});
+    var skipped = allAtts.length - filteredAtts.length;
+    if (skipped > 0) {
+      Logger.log('附件策略 [非Gmail]: 過濾 ' + skipped + ' 個 inline 圖片（保留 ' + filteredAtts.length + ' 個真正附件）');
+    }
+    return filteredAtts;
   }
-  return filteredAtts;
+}
+
+/**
+ * 檢查 Gmail HTML body 的「主文區域」是否有 inline 圖片引用（cid:）
+ * 主文區域 = gmail_quote 和 gmail_signature 標記之前的內容
+ */
+function hasBodyInlineImages(htmlBody) {
+  if (!htmlBody) return false;
+
+  var mainContent = htmlBody;
+
+  // 找到 gmail_quote 的位置（引用的舊信）
+  var quotePos = htmlBody.indexOf('gmail_quote');
+  if (quotePos > 0) {
+    mainContent = htmlBody.substring(0, quotePos);
+  }
+
+  // 再排除 gmail_signature（自己的簽名檔）
+  var sigPos = mainContent.indexOf('gmail_signature');
+  if (sigPos > 0) {
+    mainContent = mainContent.substring(0, sigPos);
+  }
+
+  // 檢查主文區域是否有 cid: 引用
+  return mainContent.indexOf('cid:') !== -1;
 }
 
 /**
