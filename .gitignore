@@ -1,14 +1,18 @@
-# ── V1/V2 遺留 ──
+# ── 合併工具 ──
 .merge_history.json
 .api_credentials.json
 
-# ── 下載的 EML/附件檔案（大量、可從 Gmail/Drive 重新取得）──
+# ── Email Processor：下載的 EML/附件檔案 ──
 下載區/
 整理好的檔案/
 V3-下載區-*/
+email-processor/下載區/
+email-processor/整理好的檔案/
+email-processor/V3-下載區-*/
 
-# ── 測試產出的 JSON 日誌（可重新產生）──
+# ── Email Processor：測試產出的 JSON 日誌 ──
 V3-*.json
+email-processor/V3-*.json
 
 # ── macOS ──
 .DS_Store

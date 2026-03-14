@@ -1,44 +1,60 @@
 # IP Winner 工具箱
 
-IP Winner 智慧財產權管理的內部自動化工具集。
+IP Winner 智慧財產權事務所的內部自動化工具集。
 
 ## 工具總覽
 
-### 1. Streamlit Web App（根目錄）
+### 1. Email Processor V3（[`email-processor/`](email-processor/)）
 
-部署於 Streamlit Cloud 的網頁工具，包含兩個功能：
+Google Apps Script 智慧郵件分類與歸檔系統，結合規則引擎 + Gemini LLM。
 
 | 功能 | 說明 |
 |------|------|
-| 📋 合併檔案 | 合併多個商標監控資料庫（Markify、摩知輪、Comp）的報告為統一 Excel |
-| 📥 下載公開說明書 | 輸入專利號碼，自動從台灣專利公開資訊 API / Google Patents 下載 PDF |
+| 自動分類 | 8 種收發碼（FC/TC/FA/TA/FG/TG/FX/TX）+ 案件類別（專利/商標/未分類） |
+| 智慧命名 | LLM 產生語義化檔名（前綴引導 + 自由摘要，含截止日與事項碼） |
+| 自動歸檔 | Drive 資料夾結構（類別 → 案號 → EML + 附件） |
+| 回饋學習 | Gmail 標籤修正 / Sheet 修正名稱 / Sheet 直填收發碼 → Few-shot 注入 |
+
+- 版本：V3
+- 技術：Google Apps Script + Gmail + Drive + Sheets + Gemini 3.0 Flash
+- 規則引擎準確率：98.8%，AI 月費約 NT$160
+- 詳細文件：[產品計畫](email-processor/docs/product-plan.md) / [工程架構](email-processor/docs/engineering-plan.md)
+
+### 2. 合併工具 + 說明書下載（[`merge-tool/`](merge-tool/)）
+
+部署於 Streamlit Cloud 的網頁工具。
+
+| 功能 | 說明 |
+|------|------|
+| 合併檔案 | 合併多個商標監控資料庫（Markify、摩知輪、Comp）的報告為統一 Excel |
+| 下載公開說明書 | 輸入專利號碼，自動從台灣專利公開資訊 API / Google Patents 下載 PDF |
 
 - 版本：v14
-- 部署說明：[部署說明.md](部署說明.md)
+- 部署說明：[merge-tool/部署說明.md](merge-tool/部署說明.md)
 
-### 2. Email Auto-Processor（`apps-script/email-processor/`）
-
-Google Apps Script，自動下載並歸檔 ip@ipwinner.com 轉寄的信件。
-
-| 功能 | 說明 |
-|------|------|
-| 信件分類 | 從主旨提取慧盈案號，依類型分為專利/商標/未分類 |
-| 附件下載 | 自動存入 Google Drive（類型/案號 資料夾結構） |
-| Gmail 標籤 | 標示處理狀態（已下載/專利、已下載/商標 等） |
-| 去重機制 | Message ID 層級追蹤，避免重複處理 |
-
-- 版本：v2.1.0
-- 詳細說明：[apps-script/email-processor/README.md](apps-script/email-processor/README.md)
-
-## 技術架構
+## 目錄結構
 
 ```
 IPWinner/
-├── streamlit_app.py              ← Streamlit Web App（Streamlit Cloud）
-├── requirements.txt
-├── 部署說明.md
-└── apps-script/
-    └── email-processor/
-        ├── README.md
-        └── IPWinner-EmailProcessor-V2.gs   ← Google Apps Script
+├── README.md
+├── LICENSE
+├── logo.jpg
+│
+├── email-processor/                 ← Email Processor V3
+│   ├── Code.gs                      ← 主程式（~2,672 行，單檔部署）
+│   ├── docs/
+│   │   ├── product-plan.md          ← 產品計畫
+│   │   └── engineering-plan.md      ← 工程架構
+│   ├── TODO.md                      ← 任務追蹤
+│   ├── email-processor-development-principles.md
+│   ├── V3-分類規則與LLM-Prompt設計.md
+│   ├── V3-分類測試與成本效益分析.md
+│   ├── V3-分類比對表-TUS1+PUS5+PTW1.xlsx
+│   ├── process_download_area.py     ← Python 輔助腳本（V1/V2 遺留）
+│   └── SESSION-2026-03-13.md
+│
+└── merge-tool/                      ← Streamlit 合併工具
+    ├── streamlit_app.py
+    ├── requirements.txt
+    └── 部署說明.md
 ```
