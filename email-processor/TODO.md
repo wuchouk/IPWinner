@@ -29,6 +29,22 @@
 ## Completed
 
 ### 2026-03-14
+- [x] 結構化期限提取 — `_selectDeadline()` + `_extractDatesFromText()`，LLM 分類日期、程式碼選期限
+- [x] `_extractMainBody()` — 從 HTML 切割主文，排除引用和簽名檔內容
+- [x] Thread 上下文 — `_getThreadSubjects()` + thread_context 傳入 LLM
+- [x] Thread 事項碼對齊 — `_alignThreadEventCodes()` 後處理，同 thread 取最高 OA/ROA 序號
+- [x] Drive 資料夾快取 — `_createFolderCache()` 避免重複查詢同一資料夾
+- [x] LLM 回應解析重構 — `_parseGeminiResponse()` + 單封重試（最多 5 次）
+- [x] JSON 修復強化 — `_repairJson()` 新增陣列截斷和通用未閉合括號修復
+- [x] SYSTEM_PROMPT 大幅更新 — OA/ROA 判斷規則、OA 縮寫去重、dates_found 輸出、correction_applied、廣告前綴、FA/FC 前綴精確語義
+- [x] 分類規則 Sheet 新增 L07-L10（語義名規則 + 期限選擇規則）
+- [x] Gmail 標籤 — `resetAllAILabels()` + 確保父標籤先建立
+- [x] 自動續行機制 — `_scheduleOnce()` / `_continueProcessing()` / `_retryFailedEmails()`
+- [x] Sheet 欄位新增 — col 12 資料夾連結、col 21 dates_found，全部索引偏移
+- [x] 多案號多行紀錄 — 每案號一行，各自對應資料夾連結
+- [x] consolidateLearning 自動寫入分類規則 Sheet + 標記 consolidated
+- [x] CONFIG 調整 — MAX_TOKENS 4096、BODY_SNIPPET_LENGTH 10000、MAX_RETRY 5
+- [x] 逾時安全檢查 — 批次迴圈內加 timeout check
 - [x] 建立 `docs/product-plan.md`（CEO Product Plan）
 - [x] 建立 `docs/engineering-plan.md`（Engineering Architecture）
 - [x] 推送 GitHub（初始 commit）

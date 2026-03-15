@@ -1,8 +1,8 @@
 # IP Winner Email Processor V3 — 工程架構文件
 
-> 版本：1.0
+> 版本：1.1
 > 最後更新：2026-03-14
-> 程式碼：`apps-script/Code.gs`（~2,672 行，單檔部署）
+> 程式碼：`email-processor/Code.gs`（~3,300+ 行，單檔部署）
 
 ---
 
@@ -70,14 +70,32 @@ Gmail Inbox
     ├── 查 Sender 名單 → role = C/A/G/X
     ├── 去除 RE:/Fwd: 前綴
     ├── 抽取附件名稱列表
-    └── 提取 HTML highlights（粗體/上色文字）
+    ├── 提取 HTML highlights（粗體/上色文字）
+    ├── _extractMainBody()：從 HTML 切割主文，排除引用/簽名檔
+    ├── _extractDatesFromText()：regex 提取所有日期（6 種格式）
+    └── _getThreadSubjects()：取同 thread 其他信件標題
     │
     ▼
 [3] LLM Batch Classify（UrlFetchApp.fetchAll）
     ├── 每批最多 20 封同時送出
-    ├── Input: structured email info + 高頻模板 + 近期修正
-    ├── Output: JSON（收發碼、語義名、類別、信心、inferred_role）
-    └── _repairJson() 修復截斷回應
+    ├── Input: structured email info + extracted_dates + thread_context + 高頻模板 + 近期修正
+    ├── Output: JSON（收發碼、語義名、dates_found、類別、信心、inferred_role、correction_applied）
+    ├── _parseGeminiResponse() 統一解析 + _repairJson() 修復截斷
+    └── 單封重試機制（最多 5 次，不重送整批）
+    │
+    ▼
+[3.5] Thread 事項碼對齊（_alignThreadEventCodes）
+    ├── 按 Thread ID 分組批次結果
+    ├── 提取 (OA1)/(ROA2) 等事項碼
+    ├── 同類型取最高序號統一替換
+    └── 確保同 thread 信件事項碼一致
+    │
+    ▼
+[3.6] 結構化期限附加（_selectDeadline）
+    ├── 根據 dates_found + 收發碼，確定性規則選期限
+    ├── TA → our_request 優先，FA → counterpart_eta 優先
+    ├── 過期檢查 → fallback 官方期限
+    └── 附加到 emlFilename 末尾（如 -期限3/17）
     │
     ▼
 [4] Source Identification（僅 role=X）
@@ -91,11 +109,12 @@ Gmail Inbox
     │
     ▼
 [6] Drive Archive（逐封處理，單線程）
-    ├── 定位/建立案號資料夾
+    ├── _createFolderCache()：批次共用資料夾快取
+    ├── 定位/建立案號資料夾（快取命中 → 0ms）
     ├── 重複偵測（同名 + 同大小 ±100 bytes → skip）
     ├── getRawContent() → createFile()
     ├── 附件下載（F 方向 + FX）
-    └── 多案號 → 複製到每個案號資料夾
+    └── 多案號 → 複製到每個案號資料夾 + 各自記錄資料夾連結
     │
     ▼
 [7] Label & Record
@@ -139,12 +158,14 @@ CONFIG = {
   PROJECT_FOLDER_NAME: 'Email自動整理v2',
   SPREADSHEET_NAME: 'Email自動整理v2-設定檔',
   GEMINI_MODEL: 'gemini-3-flash-preview',
+  GEMINI_MAX_TOKENS: 4096,
   BATCH_SIZE: 20,
   CONFIDENCE_AUTO: 0.8,      // 自動處理閾值
   CONFIDENCE_INFER: 0.6,     // 來源推斷閾值
   CONFIDENCE_LOW: 0.5,       // 低信心閾值
-  BODY_SNIPPET_LENGTH: 1500,
+  BODY_SNIPPET_LENGTH: 10000,
   TIMEOUT_SAFETY_MS: 25 * 60 * 1000,  // 25 分鐘安全閾值
+  MAX_RETRY: 5,
   CASE_NUMBER_REGEX: /(?<![A-Za-z0-9])[A-Z0-9]{4}\d{5}[PMDTABCW][A-Z]{2}\d*(?![A-Za-z0-9])/g,
   OWN_DOMAINS: ['ipwinner.com', 'ipwinner.com.tw'],
   SEND_RECEIVE_CODES: ['FC', 'TC', 'FA', 'TA', 'FG', 'TG', 'FX', 'TX'],
@@ -163,21 +184,23 @@ CONFIG = {
 
 查詢優先序：email 精確匹配 → domain 匹配。公共 domain（gmail.com 等）強制用完整 email。
 
-**Sheet 2: 處理紀錄（20 欄）**
+**Sheet 2: 處理紀錄（22 欄）**
 ```
  0: messageId        10: AI案件類別
  1: 日期              11: 來源確認狀態（na/pending/confirmed/corrected）
- 2: 原始標題          12: 最終收發碼
- 3: sender           13: 修正後名稱
- 4: AI收發碼          14: 修正原因
- 5: AI推斷角色        15: 修正時間
- 6: 歸檔案號          16: 修正來源（tag_change/name_change/sheet_edit）
- 7: 內文案號          17: 重試次數
- 8: AI語義名          18: Input Tokens
- 9: AI信心            19: Output Tokens
+ 2: 原始標題          12: 資料夾連結
+ 3: sender           13: 最終收發碼
+ 4: AI收發碼          14: 修正後名稱
+ 5: AI推斷角色        15: 修正原因
+ 6: 歸檔案號          16: 修正時間
+ 7: 內文案號          17: 修正來源（tag_change/name_change/sheet_edit/consolidated）
+ 8: AI語義名          18: 重試次數
+ 9: AI信心            19: Input Tokens
+                      20: Output Tokens
+                      21: dates_found (JSON)
 ```
 
-**Sheet 3: 分類規則**（8 分類 29 條，setupAll 自動寫入）
+**Sheet 3: 分類規則**（10 分類 33 條，setupAll 自動寫入 + consolidateLearning 動態新增）
 
 **Sheet 4: 設定**（信心閾值、batch 大小、checkpoint 等）
 
@@ -310,10 +333,12 @@ sender 不在名單 + LLM 推斷成功
 ### 重試機制
 | 錯誤類型 | 處理方式 | 上限 |
 |---------|---------|------|
-| API 呼叫失敗 | 自動重試 | 3 次 |
-| 附件下載失敗 | 標記 AI/附件下載錯誤 + 重試 | 3 次 |
-| JSON 解析失敗 | _repairJson() 修復 | 1 次 |
-| 系統錯誤 | 標記 AI/處理失敗 + 重試 | 3 次 |
+| LLM 回應解析失敗 | 單封重試（不重送整批） | 5 次 |
+| 附件下載失敗 | 標記 AI/附件下載錯誤 + 重試 | 5 次 |
+| JSON 截斷 | _repairJson() 5 種修復策略 | 1 次 |
+| 系統錯誤 | 標記 AI/處理失敗 + 重試 | 5 次 |
+| 批次處理完仍有新信 | _continueProcessing() 1 分鐘後繼續 | 鏈式 |
+| Sheet 有 [失敗] 紀錄 | _retryFailedEmails() 3 分鐘後重試 | 1 次 |
 
 ### 重跑保護
 - 同檔名 + 同大小（±100 bytes）→ 跳過不重建
@@ -333,6 +358,7 @@ sender 不在名單 + LLM 推斷成功
 | Sender 名單重複 | 無去重 | ✅ 寫入前掃描 |
 | 回授互相覆蓋 | Part 2 覆蓋 Part 1 | ✅ indexOf + 串接 |
 | TC 用過期期限 | LLM 不知信件日期 | ✅ 傳入 email_date |
+| 同 Thread 事項碼不一致 | 並行 LLM 各自推斷序號 | ✅ _alignThreadEventCodes 後處理對齊 |
 
 ---
 
@@ -342,15 +368,17 @@ sender 不在名單 + LLM 推斷成功
 ```
 [角色定義] → IP Winner 智財事務所 email 分類助手
 [輸入格式] → subject/direction/role/sender/recipients/case_numbers/
-              body_snippet/attachment_names/email_date
+              body_snippet/attachment_names/email_date/
+              extracted_dates/thread_context
 [第一步] → 確認收發碼 + 未知來源角色推斷
-[第二步] → 產生語義檔名（前綴引導 + 自由摘要 + 截止日）
-[第三步] → 期限過期判斷（email_date 比對）
-[第四步] → 案件類別判斷
-[第五步] → 案號狀態判斷
+[第二步] → 產生語義檔名（前綴引導 + 自由摘要，不含截止日）
+          + OA vs ROA 判斷規則 + OA 縮寫去重規則
+          + dates_found 分類（4 種 type）
+[第三步] → 案件類別判斷（由程式碼處理）
+[第四步] → 歸檔案號判斷
 [高頻模板] → %%TEMPLATES%%（動態注入 80 個）
-[近期修正] → %%CORRECTIONS%%（動態注入最近 20 筆）
-[輸出格式] → JSON schema
+[近期修正] → %%CORRECTIONS%%（動態注入最近 20 筆，排除 consolidated）
+[輸出格式] → JSON schema（含 dates_found、correction_applied）
 ```
 
 ### Few-shot 學習循環
@@ -363,7 +391,8 @@ sender 不在名單 + LLM 推斷成功
 ### 每週整理
 - Trigger: 每週一 9:00（weeklyConsolidate）
 - 流程：收集 correction log → LLM 歸納模式 → 寫入 Prompt Doc
-- 人工審核後決定是否併入 SYSTEM_PROMPT
+- 自動寫入分類規則 Sheet（下次處理即生效）
+- 標記已整理的修正紀錄為 consolidated（不再重複注入 few-shot）
 
 ---
 
